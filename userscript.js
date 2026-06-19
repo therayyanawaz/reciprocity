@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Instagram Unfollowers
 // @namespace    https://instagram.com/
-// @version      3.0
+// @version      4.0
 // @description  Analyze Instagram following/follower relationships and identify non-reciprocal follows
 // @author       therayyanawaz
 // @match        https://www.instagram.com/*
@@ -10,7 +10,7 @@
 
 /**
  * ============================================
- * Instagram Unfollowers v3.0
+ * Instagram Unfollowers v4.0
  * ============================================
  *
  * Analyzes any Instagram account's following/follower data.
@@ -183,6 +183,7 @@
     .iu-badge-verified { color: var(--color-info); border-color: var(--color-info); background: rgba(0,204,255,0.1); }
     .iu-badge-private { color: var(--color-warning); border-color: var(--color-warning); background: rgba(255,204,0,0.1); }
     .iu-badge-spam { color: var(--color-error); border-color: var(--color-error); background: rgba(255,51,51,0.1); }
+    .iu-badge-deactivated { color: var(--color-warning); border-color: var(--color-warning); background: rgba(255,204,0,0.15); }
 
     .iu-progress-container { display: flex; align-items: center; gap: var(--space-md); width: 100%; margin-top: var(--space-md); }
     .iu-progress { flex: 1; height: 6px; background: var(--color-bg-tertiary); border-radius: var(--radius-full); overflow: hidden; }
@@ -238,6 +239,23 @@
     .iu-queue-badge { position: fixed; top: 80px; right: 20px; background: var(--color-bg-elevated); border: 1px solid var(--color-accent); padding: 10px 15px; border-radius: 8px; z-index: 1000; display: flex; align-items: center; gap: 10px; box-shadow: var(--shadow-glow); }
     .iu-queue-spinner { width: 12px; height: 12px; border: 2px solid transparent; border-top-color: var(--color-accent); border-radius: 50%; animation: spin 1s linear infinite; }
     @keyframes spin { to { transform: rotate(360deg); } }
+
+    .iu-compare-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: var(--space-lg); gap: var(--space-md); flex-wrap: wrap; }
+    .iu-compare-btn { margin-top: var(--space-md); }
+    .iu-compare-results { display: flex; flex-direction: column; gap: var(--space-lg); }
+    .iu-compare-section { border: 1px solid var(--color-border); border-radius: var(--radius-sm); padding: var(--space-md); background: #000; }
+    .iu-compare-section-title { font-size: 0.8rem; font-weight: 600; text-transform: uppercase; margin-bottom: var(--space-sm); padding-bottom: var(--space-xs); border-bottom: 1px solid var(--color-border); }
+    .iu-compare-stat { font-size: 0.75rem; color: var(--color-text-muted); margin-bottom: var(--space-sm); }
+    .iu-compare-user { display: flex; align-items: center; gap: var(--space-sm); padding: var(--space-xs) 0; font-size: 0.8rem; }
+    .iu-compare-user.new { color: var(--color-success); }
+    .iu-compare-user.new::before { content: '+'; color: var(--color-success); font-weight: bold; margin-right: 4px; }
+    .iu-compare-user.removed { color: var(--color-error); }
+    .iu-compare-user.removed::before { content: '-'; color: var(--color-error); font-weight: bold; margin-right: 4px; }
+    .iu-compare-user.common { color: var(--color-text-muted); }
+    .iu-compare-user a { color: inherit; text-decoration: none; }
+    .iu-compare-user a:hover { text-decoration: underline; }
+    .iu-back-btn { cursor: pointer; color: var(--color-accent); font-size: 0.8rem; border: 1px solid var(--color-accent); padding: 0.3rem 0.8rem; border-radius: var(--radius-sm); background: transparent; }
+    .iu-back-btn:hover { background: var(--color-accent); color: #000; }
   `;
 
   const styleEl = document.createElement('style');
@@ -255,7 +273,7 @@
     USERS_PER_PAGE: 50,
     MAX_ACTIONS_24H: 150,
     DB_NAME: 'IU_Analytics_DB',
-    DB_VERSION: 1,
+    DB_VERSION: 2,
     DEFAULT_SETTINGS: {
       searchDelay: 1000,
       unfollowDelay: 4000,
@@ -276,20 +294,8 @@
     return parts.length === 2 ? parts.pop().split(';').shift() : null;
   };
 
-  const randomDelay = async (base, v = 0.3) => {
-    const delay = Math.floor(Math.random() * (base * 2 * v) + base * (1 - v));
-    if (Math.random() > 0.5) {
-      window.scrollBy({ top: Math.random() * 100 - 50, behavior: 'smooth' });
-    }
-    if (Math.random() > 0.7) {
-      const event = new MouseEvent('mousemove', {
-        view: window, bubbles: true, cancelable: true,
-        clientX: Math.random() * window.innerWidth,
-        clientY: Math.random() * window.innerHeight
-      });
-      document.dispatchEvent(event);
-    }
-    return delay;
+  const randomDelay = (base, v = 0.3) => {
+    return Math.floor(Math.random() * (base * 2 * v) + base * (1 - v));
   };
 
   const parseUsernameFromURL = () => {
@@ -314,10 +320,14 @@
   const downloadCSV = (users) => {
     const headers = ['Username', 'Full Name', 'User ID', 'Profile URL', 'Is Verified', 'Is Private', 'Followers', 'Following', 'Ratio'];
     const rows = users.map(u => {
-      const ratio = u.following_count > 0 ? (u.follower_count / u.following_count).toFixed(2) : 0;
+      const hasStats = u.enriched;
+      const ratio = hasStats && u.following_count > 0 ? (u.follower_count / u.following_count).toFixed(2) : 'N/A';
       return [
         u.username, `"${u.full_name || ''}"`, u.id, `https://instagram.com/${u.username}`,
-        u.is_verified, u.is_private, u.follower_count || 0, u.following_count || 0, ratio
+        u.is_verified, u.is_private,
+        hasStats ? (u.follower_count || 0) : 'N/A',
+        hasStats ? (u.following_count || 0) : 'N/A',
+        ratio
       ].join(',');
     });
     const csvContent = 'data:text/csv;charset=utf-8,' + [headers.join(','), ...rows].join('\n');
@@ -364,6 +374,9 @@
             store.createIndex('userId', 'userId', { unique: false });
             store.createIndex('timestamp', 'timestamp', { unique: false });
           }
+          if (!db.objectStoreNames.contains('enriched')) {
+            db.createObjectStore('enriched', { keyPath: 'id' });
+          }
         };
         req.onsuccess = e => { this.db = e.target.result; resolve(); };
         req.onerror = e => reject(e);
@@ -389,6 +402,43 @@
         req.onsuccess = e => resolve(e.target.result.sort((a, b) => b.timestamp - a.timestamp));
         req.onerror = e => reject(e);
       });
+    },
+    async getLatestSnapshot(userId, type) {
+      const snapshots = await this.getSnapshots(userId);
+      const exact = snapshots.find(s => s.type === type);
+      if (exact) return exact;
+      // Fallback: return the most recent snapshot of any type
+      return snapshots.length > 0 ? snapshots[0] : null;
+    },
+    async saveEnriched(userId, data) {
+      if (!this.db) await this.init();
+      return new Promise((resolve, reject) => {
+        const tx = this.db.transaction('enriched', 'readwrite');
+        const store = tx.objectStore('enriched');
+        store.put({ id: userId, ...data, enrichedAt: Date.now() });
+        tx.oncomplete = () => resolve();
+        tx.onerror = e => reject(e);
+      });
+    },
+    async getEnriched(userId) {
+      if (!this.db) await this.init();
+      return new Promise((resolve, reject) => {
+        const req = this.db.transaction('enriched', 'readonly')
+          .objectStore('enriched').get(userId);
+        req.onsuccess = e => resolve(e.target.result || null);
+        req.onerror = e => reject(e);
+      });
+    },
+    async getAllEnrichedForScan(userId, userList) {
+      if (!this.db) await this.init();
+      const enriched = await this.getEnriched(userId);
+      if (!enriched || !enriched.users) return {};
+      const userMap = {};
+      userList.forEach(u => {
+        const e = enriched.users[u.id];
+        if (e) userMap[u.id] = e;
+      });
+      return userMap;
     }
   };
 
@@ -501,14 +551,14 @@
           renderApp();
           return;
         }
-        const newQ = q.filter(t => t.targetId !== task.targetId);
-        Storage.set(CONFIG.QUEUE_KEY, newQ);
         try {
           if (task.action === 'unfollow') await API.unfollow(task.targetId);
           else if (task.action === 'remove') await API.removeFollower(task.targetId);
           LimitGuardian.record();
+          const newQ = q.filter(t => t.targetId !== task.targetId);
+          Storage.set(CONFIG.QUEUE_KEY, newQ);
           if (newQ.length === 0) fireDiscordWebhook('Action queue completed.');
-          await sleep(await randomDelay(state.settings.unfollowDelay));
+          await sleep(randomDelay(state.settings.unfollowDelay));
           renderApp();
         } catch (e) { console.error('Queue task failed', e); }
       }, 30000);
@@ -532,8 +582,68 @@
   };
 
   // ============================================
+  // Enrichment Manager — Background User Stats
+  // ============================================
+  async function startEnrichment() {
+    if (state.enriching || state.results.length === 0) return;
+    state.enrichQueue = state.results.filter(u => !u.enriched).map(u => u.id);
+    state.enrichDone = 0;
+    state.enrichTotal = state.enrichQueue.length;
+    state.enriching = true;
+    renderApp();
+    showToast(`Enriching ${state.enrichTotal} users...`, 'info');
+    enricherLoop();
+  }
+
+  async function enricherLoop() {
+    while (state.enrichQueue.length > 0) {
+      if (!state.enriching) break; // Allow manual abort
+      const userId = state.enrichQueue.shift();
+      const user = state.results.find(u => u.id === userId); // Fix: Get from results to handle Time-Machine users
+      if (user && !user.enriched) {
+        try {
+          const data = await API.getUserByUsername(user.username);
+          user.follower_count = data.follower_count;
+          user.following_count = data.following_count;
+          user.enriched = true;
+          // Persist to IDB
+          const existing = await IDB.getEnriched(state.targetUser.id) || { users: {} };
+          existing.users[user.id] = { follower_count: data.follower_count, following_count: data.following_count };
+          await IDB.saveEnriched(state.targetUser.id, { users: existing.users });
+        } catch (e) {
+          // User may be deleted or rate limited — skip
+        }
+      }
+      state.enrichDone++;
+      renderApp();
+      await sleep(randomDelay(3000));
+    }
+    state.enriching = false;
+    renderApp();
+    showToast(`Enrichment complete: ${state.enrichDone} users enriched`, 'success');
+  }
+
+  async function mergeEnrichedData() {
+    const allUsers = [...state.following, ...state.followers];
+    if (allUsers.length === 0) return;
+    const enrichedMap = await IDB.getAllEnrichedForScan(state.targetUser.id, allUsers);
+    let merged = 0;
+    allUsers.forEach(u => {
+      if (enrichedMap[u.id]) {
+        u.follower_count = enrichedMap[u.id].follower_count;
+        u.following_count = enrichedMap[u.id].following_count;
+        u.enriched = true;
+        merged++;
+      }
+    });
+    if (merged > 0) console.log(`[Enrich] Merged ${merged} previously enriched users`);
+  }
+
+  // ============================================
   // State
   // ============================================
+  let searchTimer;
+  let enrichTimer;
   let state = {
     status: 'initial',
     targetUsername: parseUsernameFromURL() || '',
@@ -560,14 +670,62 @@
     error: null,
     filter: { verified: true, private: true, noAvatar: false, highSpam: false },
     scanMode: 'non_followers',
-    snapshots: []
+    snapshots: [],
+    snapshotSelection: [],
+    compareResult: null,
+    enriching: false,
+    enrichQueue: [],
+    enrichDone: 0,
+    enrichTotal: 0
   };
 
   const loadSnapshots = async () => {
     if (state.targetUser) {
       state.snapshots = await IDB.getSnapshots(state.targetUser.id);
+      state.snapshotSelection = [];
+      state.compareResult = null;
       renderApp();
     }
+  };
+
+  const compareSnapshots = (snapA, snapB) => {
+    const usersA = snapA.data || [];
+    const usersB = snapB.data || [];
+    const idsA = new Set(usersA.map(u => u.id));
+    const idsB = new Set(usersB.map(u => u.id));
+    return {
+      new: usersB.filter(u => !idsA.has(u.id)),
+      removed: usersA.filter(u => !idsB.has(u.id)),
+      common: usersB.filter(u => idsA.has(u.id))
+    };
+  };
+
+  const runComparison = () => {
+    if (state.snapshotSelection.length !== 2) return;
+    const [idA, idB] = state.snapshotSelection;
+    const snapA = state.snapshots.find(s => s.id === idA);
+    const snapB = state.snapshots.find(s => s.id === idB);
+    if (!snapA || !snapB) return;
+    state.compareResult = {
+      snapA,
+      snapB,
+      result: compareSnapshots(snapA, snapB)
+    };
+    renderApp();
+  };
+
+  const toggleSnapshotSelection = (snapshotId) => {
+    const idx = state.snapshotSelection.indexOf(snapshotId);
+    if (idx >= 0) {
+      state.snapshotSelection.splice(idx, 1);
+    } else {
+      if (state.snapshotSelection.length >= 2) {
+        state.snapshotSelection.shift();
+      }
+      state.snapshotSelection.push(snapshotId);
+    }
+    state.compareResult = null;
+    renderApp();
   };
 
   // ============================================
@@ -582,7 +740,7 @@
       else e[k] = v;
     });
     children.forEach(c => {
-      if (typeof c === 'string') e.appendChild(document.createTextNode(c));
+      if (typeof c === 'string' || typeof c === 'number') e.appendChild(document.createTextNode(String(c)));
       else if (c) e.appendChild(c);
     });
     return e;
@@ -627,15 +785,23 @@
         el('div', { className: 'iu-brand' }, [
           el('div', { className: 'iu-logo' }, ['>']),
           el('div', {}, [
-            el('div', { className: 'iu-title' }, ['UNFOLLOWERS v3']),
+            el('div', { className: 'iu-title' }, ['UNFOLLOWERS v4']),
             el('div', { className: 'iu-subtitle' }, ['Relationship Analysis Engine'])
           ])
         ]),
         el('div', { className: 'iu-actions' }, [
           state.status !== 'initial' && state.status !== 'error' && el('input', {
             className: 'iu-input', type: 'text', placeholder: 'Search...', value: state.search,
-            onInput: e => { state.search = e.target.value; state.page = 1; renderApp(); }
+            onInput: e => {
+              state.search = e.target.value;
+              state.page = 1;
+              clearTimeout(searchTimer);
+              searchTimer = setTimeout(() => renderApp(), 250);
+            }
           }),
+          state.status === 'scanning' && el('button', {
+            className: 'iu-btn iu-btn-danger', onClick: () => { state.status = 'error'; state.error = 'Scan manually aborted.'; renderApp(); }
+          }, ['\u25A0 Stop Scan']),
           state.status === 'scanning' && el('button', {
             className: 'iu-btn iu-btn-secondary', onClick: () => downloadCSV(state.results)
           }, ['\uD83D\uDCBE Export CSV']),
@@ -669,27 +835,67 @@
           value: state.targetUsername,
           onInput: e => { state.targetUsername = e.target.value.replace(/[@\s]/g, ''); renderApp(); }
         })
-      ]),
-      el('div', { className: 'iu-section' }, [
-        el('h3', { className: 'iu-section-title' }, ['SCAN MODE']),
-        el('div', { className: 'iu-filter-list', style: 'flex-direction: row; justify-content: center; gap: 2rem;' }, [
-          el('label', { className: 'iu-filter-item' }, [
-            el('input', { type: 'radio', className: 'iu-radio', checked: state.scanMode === 'non_followers',
-              onChange: () => { state.scanMode = 'non_followers'; renderApp(); } }),
-            el('span', {}, ['Non-Followers'])
+      ]),          el('div', { className: 'iu-section' }, [
+            el('h3', { className: 'iu-section-title' }, ['SCAN MODE']),
+            el('div', { className: 'iu-filter-list' }, [
+              el('label', { className: 'iu-filter-item' }, [
+                el('input', { type: 'radio', className: 'iu-radio', checked: state.scanMode === 'non_followers',
+                  onChange: () => { state.scanMode = 'non_followers'; renderApp(); } }),
+                el('div', { className: 'iu-radio-content' }, [
+                  el('div', { className: 'iu-radio-label' }, ['Non-Followers']),
+                  el('div', { className: 'iu-radio-desc' }, ['Accounts you follow that don\'t follow back'])
+                ])
+              ]),
+              el('label', { className: 'iu-filter-item' }, [
+                el('input', { type: 'radio', className: 'iu-radio', checked: state.scanMode === 'mutuals',
+                  onChange: () => { state.scanMode = 'mutuals'; renderApp(); } }),
+                el('div', { className: 'iu-radio-content' }, [
+                  el('div', { className: 'iu-radio-label' }, ['Mutuals']),
+                  el('div', { className: 'iu-radio-desc' }, ['Accounts that follow you back (reciprocal)'])
+                ])
+              ]),
+              el('label', { className: 'iu-filter-item' }, [
+                el('input', { type: 'radio', className: 'iu-radio', checked: state.scanMode === 'fans',
+                  onChange: () => { state.scanMode = 'fans'; renderApp(); } }),
+                el('div', { className: 'iu-radio-content' }, [
+                  el('div', { className: 'iu-radio-label' }, ['Fans']),
+                  el('div', { className: 'iu-radio-desc' }, ['Accounts that follow you but you don\'t follow back'])
+                ])
+              ]),
+              el('label', { className: 'iu-filter-item' }, [
+                el('input', { type: 'radio', className: 'iu-radio', checked: state.scanMode === 'following',
+                  onChange: () => { state.scanMode = 'following'; renderApp(); } }),
+                el('div', { className: 'iu-radio-content' }, [
+                  el('div', { className: 'iu-radio-label' }, ['Following']),
+                  el('div', { className: 'iu-radio-desc' }, ['Full list of accounts being followed'])
+                ])
+              ]),
+              el('label', { className: 'iu-filter-item' }, [
+                el('input', { type: 'radio', className: 'iu-radio', checked: state.scanMode === 'followers',
+                  onChange: () => { state.scanMode = 'followers'; renderApp(); } }),
+                el('div', { className: 'iu-radio-content' }, [
+                  el('div', { className: 'iu-radio-label' }, ['Followers']),
+                  el('div', { className: 'iu-radio-desc' }, ['Full list of followers'])
+                ])
+              ]),
+              el('label', { className: 'iu-filter-item' }, [
+                el('input', { type: 'radio', className: 'iu-radio', checked: state.scanMode === 'recent_unfollowers',
+                  onChange: () => { state.scanMode = 'recent_unfollowers'; renderApp(); } }),
+                el('div', { className: 'iu-radio-content' }, [
+                  el('div', { className: 'iu-radio-label' }, ['New Unfollowers']),
+                  el('div', { className: 'iu-radio-desc' }, ['Accounts that unfollowed since last scan (requires snapshot)'])
+                ])
+              ]),
+              el('label', { className: 'iu-filter-item' }, [
+                el('input', { type: 'radio', className: 'iu-radio', checked: state.scanMode === 'deactivated',
+                  onChange: () => { state.scanMode = 'deactivated'; renderApp(); } }),
+                el('div', { className: 'iu-radio-content' }, [
+                  el('div', { className: 'iu-radio-label' }, ['Deactivated']),
+                  el('div', { className: 'iu-radio-desc' }, ['Accounts that were deactivated, banned, or removed since last scan'])
+                ])
+              ])
+            ])
           ]),
-          el('label', { className: 'iu-filter-item' }, [
-            el('input', { type: 'radio', className: 'iu-radio', checked: state.scanMode === 'following',
-              onChange: () => { state.scanMode = 'following'; renderApp(); } }),
-            el('span', {}, ['Following'])
-          ]),
-          el('label', { className: 'iu-filter-item' }, [
-            el('input', { type: 'radio', className: 'iu-radio', checked: state.scanMode === 'followers',
-              onChange: () => { state.scanMode = 'followers'; renderApp(); } }),
-            el('span', {}, ['Followers'])
-          ])
-        ])
-      ]),
       el('div', { className: 'iu-warning' }, [
         el('div', { className: 'iu-warning-title' }, [
           API.isLoggedIn() ? 'Logged In' : 'Not Logged In'
@@ -763,6 +969,21 @@
             ])
           ]),
           el('div', { className: 'iu-section' }, [
+            el('h3', { className: 'iu-section-title' }, ['Enrichment']),
+            state.enriching
+              ? el('div', { style: 'display:flex; flex-direction:column; gap:8px;' }, [
+                  el('div', { style: 'font-size:0.75rem;color:var(--color-accent);text-align:center;' },
+                    [`Enriching: ${state.enrichDone}/${state.enrichTotal}`]
+                  ),
+                  el('button', { className: 'iu-btn iu-btn-danger', style: 'width:100%', onClick: () => { state.enriching = false; } }, ['Stop Enriching'])
+                ])
+              : el('button', {
+                  className: 'iu-btn iu-btn-primary', style: 'width:100%',
+                  onClick: startEnrichment,
+                  disabled: state.results.length === 0 || state.results.every(u => u.enriched)
+                }, ['\uD83D\uDCA1 Enrich Stats'])
+          ]),
+          el('div', { className: 'iu-section' }, [
             el('h3', { className: 'iu-section-title' }, ['Selection']),
             el('button', { className: 'iu-btn iu-btn-ghost', style: 'width:100%;margin-bottom:5px',
               onClick: () => { state.selected = [...getFilteredUsers()]; renderApp(); }
@@ -828,29 +1049,136 @@
   }
 
   function renderDashboard() {
+    if (state.compareResult) {
+      return renderCompareView();
+    }
+
     if (state.snapshots.length === 0) {
       return el('div', { className: 'iu-empty' },
         ['No historical data yet. Complete a scan to generate snapshots.']
       );
     }
-    return el('div', { className: 'iu-section' }, [
-      el('h3', { className: 'iu-section-title' }, ['Historical Snapshots']),
-      ...state.snapshots.map(s => {
-        const d = new Date(s.timestamp);
-        return el('div', { className: 'iu-user-item', style: 'margin-bottom:10px;display:block;' }, [
-          el('div', { style: 'display:flex;justify-content:space-between;margin-bottom:10px;' }, [
-            el('span', { style: 'color:var(--color-accent);font-weight:bold' }, [s.type.toUpperCase()]),
-            el('span', { style: 'color:var(--color-text-muted);font-size:0.8rem' }, [d.toLocaleString()])
-          ]),
-          el('div', { className: 'iu-bar-container' }, [
-            el('div', { className: 'iu-bar-label' }, ['Count']),
-            el('div', { className: 'iu-bar-wrapper' }, [
-              el('div', { className: 'iu-bar-fill', style: `width: ${Math.min(100, s.count / 10)}%` })
+
+    const canCompare = state.snapshotSelection.length === 2;
+
+    // Build type summary: count snapshots per type
+    const typeCounts = {};
+    state.snapshots.forEach(s => {
+      typeCounts[s.type] = (typeCounts[s.type] || 0) + 1;
+    });
+    const sortedTypes = Object.entries(typeCounts).sort((a, b) => b[1] - a[1]);
+
+    return el('div', {}, [
+      el('div', { className: 'iu-section', style: 'margin-bottom:var(--space-lg)' }, [
+        el('div', { className: 'iu-compare-header' }, [
+          el('h3', { className: 'iu-section-title', style: 'margin-bottom:0;border:none;' }, ['Historical Snapshots']),
+          canCompare && el('button', {
+            className: 'iu-btn iu-btn-primary',
+            onClick: runComparison
+          }, ['Compare Selected'])
+        ].filter(Boolean)),
+        // Type summary bar
+        el('div', { style: 'display:flex;gap:var(--space-sm);flex-wrap:wrap;margin-bottom:var(--space-md);padding-bottom:var(--space-sm);border-bottom:1px solid var(--color-border);' },
+          sortedTypes.map(([type, count]) =>
+            el('span', { style: `font-size:0.7rem;padding:2px 10px;border-radius:var(--radius-full);border:1px solid var(--color-border);color:var(--color-accent);background:rgba(0,255,65,0.05);` },
+              [`${type.replace(/_/g, ' ')}: ${count}`]
+            )
+          )
+        ),
+        el('div', { style: 'font-size:0.7rem;color:var(--color-text-muted);margin-bottom:var(--space-md);' },
+          ['Select two snapshots of the same type to compare changes over time.']
+        ),
+        ...state.snapshots.map(s => {
+          const d = new Date(s.timestamp);
+          const isSelected = state.snapshotSelection.includes(s.id);
+          const selIdx = state.snapshotSelection.indexOf(s.id);
+          return el('label', {
+            className: 'iu-user-item',
+            style: `margin-bottom:8px;display:flex;align-items:center;cursor:pointer;${isSelected ? 'border-color:var(--color-accent);box-shadow:0 0 10px var(--color-accent-glow);' : ''}`
+          }, [
+            el('div', { style: 'flex:1;' }, [
+              el('div', { style: 'display:flex;justify-content:space-between;margin-bottom:6px;' }, [
+                el('span', { style: `color:${isSelected ? 'var(--color-accent)' : 'var(--color-text-secondary)'};font-weight:bold;font-size:0.85rem;` },
+                  [s.type.toUpperCase()]
+                ),
+                el('span', { style: 'color:var(--color-text-muted);font-size:0.75rem;' }, [d.toLocaleString()])
+              ]),
+              el('div', { className: 'iu-bar-container', style: 'margin-bottom:0;' }, [
+                el('div', { className: 'iu-bar-label' }, ['Count']),
+                el('div', { className: 'iu-bar-wrapper' }, [
+                  el('div', { className: 'iu-bar-fill', style: `width: ${Math.min(100, s.count / 10)}%` })
+                ]),
+                el('div', { className: 'iu-bar-value' }, [s.count])
+              ])
             ]),
-            el('div', { className: 'iu-bar-value' }, [s.count])
-          ])
-        ]);
-      })
+            el('div', {
+              style: `width:22px;height:22px;border-radius:50%;border:2px solid ${isSelected ? 'var(--color-accent)' : 'var(--color-text-muted)'};display:flex;align-items:center;justify-content:center;font-size:0.7rem;font-weight:bold;color:${isSelected ? 'var(--color-accent)' : 'var(--color-text-muted)'};margin-left:12px;flex-shrink:0;`
+            }, [isSelected ? (selIdx === 0 ? 'A' : 'B') : ''])
+          ]);
+        })
+      ])
+    ]);
+  }
+
+  function renderCompareView() {
+    const { snapA, snapB, result } = state.compareResult;
+    const dateA = new Date(snapA.timestamp);
+    const dateB = new Date(snapB.timestamp);
+
+    return el('div', {}, [
+      el('div', { className: 'iu-section', style: 'margin-bottom:var(--space-lg);' }, [
+        el('div', { className: 'iu-compare-header' }, [
+          el('h3', { className: 'iu-section-title', style: 'margin-bottom:0;border:none;' }, ['Comparison Results']),
+          el('button', { className: 'iu-back-btn', onClick: () => { state.compareResult = null; renderApp(); } }, ['\u2190 Back to Snapshots'])
+        ]),
+        el('div', { style: 'display:flex;gap:var(--space-md);font-size:0.75rem;color:var(--color-text-muted);margin-bottom:var(--space-md);flex-wrap:wrap;' }, [
+          el('span', {}, [`Snapshot A (${dateA.toLocaleString()}): ${snapA.count} ${snapA.type}`]),
+          el('span', {}, [`Snapshot B (${dateB.toLocaleString()}): ${snapB.count} ${snapB.type}`])
+        ]),
+        el('div', { style: 'display:flex;gap:var(--space-md);flex-wrap:wrap;margin-bottom:var(--space-md);' }, [
+          el('span', { style: 'color:var(--color-success);font-weight:bold;font-size:0.85rem;' }, [`+${result.new.length} New`]),
+          el('span', { style: 'color:var(--color-error);font-weight:bold;font-size:0.85rem;' }, [`-${result.removed.length} Removed`]),
+          el('span', { style: 'color:var(--color-text-muted);font-size:0.85rem;' }, [`=${result.common.length} Unchanged`])
+        ])
+      ]),
+      el('div', { className: 'iu-compare-results' }, [
+        result.new.length > 0 && el('div', { className: 'iu-compare-section', style: 'border-left:3px solid var(--color-success)' }, [
+          el('div', { className: 'iu-compare-section-title', style: 'color:var(--color-success);border-bottom-color:var(--color-success);' }, ['New Users']),
+          el('div', { className: 'iu-compare-stat' }, [`${result.new.length} users joined since snapshot A`]),
+          el('div', {}, result.new.slice(0, 100).map(u =>
+            el('div', { className: 'iu-compare-user new' }, [
+              el('a', { href: `https://instagram.com/${u.username}`, target: '_blank' }, [u.username])
+            ])
+          )),
+          result.new.length > 100 && el('div', { className: 'iu-compare-stat', style: 'margin-top:var(--space-sm);color:var(--color-warning);' },
+            [`... and ${result.new.length - 100} more`]
+          )
+        ].filter(Boolean)),
+        result.removed.length > 0 && el('div', { className: 'iu-compare-section', style: 'border-left:3px solid var(--color-error)' }, [
+          el('div', { className: 'iu-compare-section-title', style: 'color:var(--color-error);border-bottom-color:var(--color-error);' }, ['Removed Users']),
+          el('div', { className: 'iu-compare-stat' }, [`${result.removed.length} users left since snapshot A`]),
+          el('div', {}, result.removed.slice(0, 100).map(u =>
+            el('div', { className: 'iu-compare-user removed' }, [
+              el('a', { href: `https://instagram.com/${u.username}`, target: '_blank' }, [u.username])
+            ])
+          )),
+          result.removed.length > 100 && el('div', { className: 'iu-compare-stat', style: 'margin-top:var(--space-sm);color:var(--color-warning);' },
+            [`... and ${result.removed.length - 100} more`]
+          )
+        ].filter(Boolean)),
+        result.common.length > 0 && el('div', { className: 'iu-compare-section', style: 'border-left:3px solid var(--color-text-muted)' }, [
+          el('div', { className: 'iu-compare-section-title', style: 'color:var(--color-text-muted);border-bottom-color:var(--color-text-muted);' }, ['Unchanged Users']),
+          el('div', { className: 'iu-compare-stat' }, [`${result.common.length} users present in both snapshots`]),
+          el('div', {}, result.common.slice(0, 50).map(u =>
+            el('div', { className: 'iu-compare-user common' }, [
+              el('a', { href: `https://instagram.com/${u.username}`, target: '_blank' }, [u.username])
+            ])
+          )),
+          result.common.length > 50 && el('div', { className: 'iu-compare-stat', style: 'margin-top:var(--space-sm);color:var(--color-warning);' },
+            [`... and ${result.common.length - 50} more`]
+          )
+        ].filter(Boolean))
+      ].filter(Boolean))
     ]);
   }
 
@@ -883,10 +1211,11 @@
         user.is_verified && el('span', { className: 'iu-badge iu-badge-verified' }, ['\u2713']),
         user.is_private && el('span', { className: 'iu-badge iu-badge-private' }, ['\uD83D\uDD12']),
         isSpam && el('span', { className: 'iu-badge iu-badge-spam' }, ['SPAM']),
-        noAvatar && el('span', { className: 'iu-badge iu-badge-spam' }, ['GHOST'])
+        noAvatar && el('span', { className: 'iu-badge iu-badge-spam' }, ['GHOST']),
+        user.__deactivated && el('span', { className: 'iu-badge iu-badge-deactivated' }, ['DEACTIVATED'])
       ].filter(Boolean)),
       el('div', { style: 'font-size:0.7rem;color:var(--color-text-muted);min-width:60px;text-align:right;' },
-        [`R: ${ratio.toFixed(2)}`]
+        [user.enriched ? `R: ${ratio.toFixed(2)}` : 'R: --']
       ),
       el('button', {
         className: 'iu-btn iu-btn-ghost', style: 'padding:0.25rem 0.5rem;',
@@ -979,6 +1308,39 @@
     return users.slice((state.page - 1) * CONFIG.USERS_PER_PAGE, state.page * CONFIG.USERS_PER_PAGE);
   }
 
+  /**
+   * Compute results for a given scan mode using the fetched data.
+   * Extracted from startScan() for clarity and extensibility.
+   */
+  function computeResults(scanMode, following, followers, oldSnapshot) {
+    if (scanMode === 'following') return [...following];
+    if (scanMode === 'followers') return [...followers];
+
+    if (scanMode === 'non_followers') {
+      const followerIds = new Set(followers.map(f => String(f.id)));
+      return following.filter(f => !followerIds.has(String(f.id)));
+    }
+    if (scanMode === 'mutuals') {
+      const followerIds = new Set(followers.map(f => String(f.id)));
+      return following.filter(f => followerIds.has(String(f.id)));
+    }
+    if (scanMode === 'fans') {
+      const followingIds = new Set(following.map(f => String(f.id)));
+      return followers.filter(f => !followingIds.has(String(f.id)));
+    }
+    if (scanMode === 'recent_unfollowers') {
+      if (!oldSnapshot) return [];
+      const currentIds = new Set(followers.map(f => String(f.id)));
+      return (oldSnapshot.data || []).filter(u => !currentIds.has(u.id));
+    }
+    if (scanMode === 'deactivated') {
+      if (!oldSnapshot) return [];
+      const currentIds = new Set(following.map(f => String(f.id)));
+      return (oldSnapshot.data || []).filter(u => !currentIds.has(u.id));
+    }
+    return [];
+  }
+
   function toggleWhitelist(user) {
     const exists = state.whitelist.some(u => u.id === user.id);
     state.whitelist = exists ? state.whitelist.filter(u => u.id !== user.id) : [...state.whitelist, user];
@@ -1031,15 +1393,57 @@
     renderApp();
 
     try {
-      await fetchFollowingList(state.targetUser.id);
-      await fetchFollowersList(state.targetUser.id);
-
-      if (state.scanMode === 'following') state.results = state.following;
-      else if (state.scanMode === 'followers') state.results = state.followers;
-      else {
-        const followerIds = new Set(state.followers.map(f => String(f.id)));
-        state.results = state.following.filter(f => !followerIds.has(String(f.id)));
+      // Check snapshot availability for time-machine modes
+      if (state.scanMode === 'recent_unfollowers' || state.scanMode === 'deactivated') {
+        const neededType = state.scanMode === 'deactivated' ? 'following' : 'followers';
+        const snap = await IDB.getLatestSnapshot(state.targetUser.id, neededType);
+        if (!snap) {
+          state.status = 'error';
+          state.error = 'No snapshots found for this account. Complete a scan first to generate one.';
+          renderApp();
+          return;
+        }
+        if (snap.type !== neededType) {
+          showToast(`No ${neededType} snapshot found — using most recent snapshot (${snap.type}) as fallback`, 'warning');
+        }
+        state._oldSnapshot = snap;
       }
+
+      // Fetch only what's needed for the selected mode
+      const needsFollowing = ['following', 'non_followers', 'mutuals', 'fans', 'deactivated'].includes(state.scanMode);
+      const needsFollowers = ['followers', 'non_followers', 'mutuals', 'fans', 'recent_unfollowers'].includes(state.scanMode);
+
+      if (needsFollowing) await fetchFollowingList(state.targetUser.id);
+      if (needsFollowers) await fetchFollowersList(state.targetUser.id);
+
+      // Process results based on scan mode
+      if (state.scanMode === 'deactivated') {
+        // Phase 1: compute delta (users who dropped off since last snapshot)
+        const missingUsers = computeResults(state.scanMode, state.following, null, state._oldSnapshot);
+        // Phase 2: verify each missing user via profile API
+        state.results = [];
+        for (let i = 0; i < missingUsers.length; i++) {
+          try {
+            await API.getUserByUsername(missingUsers[i].username);
+            // User exists — just unfollowed, skip
+          } catch (err) {
+            if (err.message.includes('not found') || err.message.includes('404')) {
+              state.results.push({ ...missingUsers[i], __deactivated: true });
+            }
+          }
+          state.pct = Math.floor(((i + 1) / missingUsers.length) * 50) + 50;
+          renderApp();
+          if (i < missingUsers.length - 1) await sleep(randomDelay(2000));
+        }
+      } else {
+        state.results = computeResults(state.scanMode, state.following, state.followers, state._oldSnapshot);
+      }
+
+      // Merge any previously enriched stats
+      await mergeEnrichedData();
+
+      // Clean up temporary state
+      delete state._oldSnapshot;
 
       // Apply auto-whitelist rules (batched — single render + storage write)
       const toWhitelist = state.results.filter(u =>
@@ -1052,40 +1456,64 @@
       }
 
       state.pct = 100;
-      await IDB.saveSnapshot(state.targetUser.id, state.scanMode, state.results);
+
+      // Intelligent Baseline Snapshotting
+      // Automatically save full baseline lists if they were fetched, empowering Time-Machine modes.
+      if (needsFollowing && state.following.length > 0) {
+        await IDB.saveSnapshot(state.targetUser.id, 'following', state.following);
+      }
+      if (needsFollowers && state.followers.length > 0) {
+        await IDB.saveSnapshot(state.targetUser.id, 'followers', state.followers);
+      }
+
+      // Save specific mode result if it's not a core baseline list or time-machine delta
+      if (!['recent_unfollowers', 'deactivated', 'following', 'followers'].includes(state.scanMode)) {
+        await IDB.saveSnapshot(state.targetUser.id, state.scanMode, state.results);
+      }
+
       renderApp();
-      showToast(`Scan complete! Found ${state.results.length}`, 'success');
-      fireDiscordWebhook(`Scan complete for @${state.targetUser.username}. Found ${state.results.length} results.`);
+      const modeLabel = state.scanMode.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+      showToast(`${modeLabel} scan complete! Found ${state.results.length} accounts`, 'success');
+      fireDiscordWebhook(`${modeLabel} scan for @${state.targetUser.username}: ${state.results.length} results.`);
     } catch (e) {
-      showToast('Scan failed', 'error');
+      showToast('Scan failed: ' + e.message, 'error');
     }
   }
 
   async function fetchFollowingList(userId) {
     let cursor = null;
     let hasNext = true;
-    while (hasNext) {
+    const isCombo = ['followers', 'non_followers', 'mutuals', 'fans', 'recent_unfollowers'].includes(state.scanMode);
+    
+    while (hasNext && state.status === 'scanning') {
       const data = await API.getFollowing(userId, cursor);
       data.edges.forEach(e => state.following.push(e.node));
       hasNext = data.page_info.has_next_page;
       cursor = data.page_info.end_cursor;
-      state.pct = Math.floor((state.following.length / state.totalCount) * 100);
+      
+      const total = isCombo ? (state.totalCount || 1) : (state.targetUser.following_count || 1);
+      state.pct = Math.floor((state.following.length / total) * 100);
       renderApp();
-      await sleep(await randomDelay(state.settings.searchDelay));
+      await sleep(randomDelay(state.settings.searchDelay));
     }
   }
 
   async function fetchFollowersList(userId) {
     let cursor = null;
     let hasNext = true;
-    while (hasNext) {
+    const isCombo = ['following', 'non_followers', 'mutuals', 'fans', 'deactivated'].includes(state.scanMode);
+
+    while (hasNext && state.status === 'scanning') {
       const data = await API.getFollowers(userId, cursor);
       data.edges.forEach(e => state.followers.push(e.node));
       hasNext = data.page_info.has_next_page;
       cursor = data.page_info.end_cursor;
-      state.pct = Math.floor(((state.following.length + state.followers.length) / state.totalCount) * 100);
+      
+      const total = isCombo ? (state.totalCount || 1) : (state.targetUser.follower_count || 1);
+      const currentFetched = isCombo ? (state.following.length + state.followers.length) : state.followers.length;
+      state.pct = Math.floor((currentFetched / total) * 100);
       renderApp();
-      await sleep(await randomDelay(state.settings.searchDelay));
+      await sleep(randomDelay(state.settings.searchDelay));
     }
   }
 
