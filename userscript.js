@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Instagram Unfollowers
 // @namespace    https://instagram.com/
-// @version      4.0
+// @version      4.1
 // @description  Analyze Instagram following/follower relationships and identify non-reciprocal follows
 // @author       therayyanawaz
 // @match        https://www.instagram.com/*
@@ -26,8 +26,6 @@
   // Inject Styles
   // ============================================
   const styles = `
-    @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap');
-
     .iu-app {
       --color-bg-primary: #000000;
       --color-bg-secondary: #050505;
@@ -62,7 +60,7 @@
       --space-lg: 1.5rem;
       --space-xl: 1.75rem;
 
-      --font-family: 'JetBrains Mono', monospace;
+      --font-family: 'Courier New', 'Consolas', 'Monaco', 'Liberation Mono', monospace;
       --transition-fast: 100ms ease;
       --transition-base: 200ms ease;
 
@@ -279,8 +277,8 @@
       unfollowDelay: 4000,
       autoWhitelistVerified: false,
       autoWhitelistPrivate: false,
-      discordWebhookUrl: '',
-      enableQueue: true
+      enableQueue: true,
+      snapshotRetentionDays: 30
     }
   };
 
@@ -288,6 +286,7 @@
   // Utilities
   // ============================================
   const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const getRetentionMs = () => (state.settings.snapshotRetentionDays || 30) * 24 * 60 * 60 * 1000;
 
   const getCookie = name => {
     const parts = `; ${document.cookie}`.split(`; ${name}=`);
@@ -340,24 +339,25 @@
     document.body.removeChild(link);
   };
 
-  const fireDiscordWebhook = async (message, color = 65280) => {
-    const url = state.settings.discordWebhookUrl;
-    if (!url) return;
+  const sendDesktopNotification = (title, body) => {
+    if (!state._notificationsGranted) return;
     try {
-      await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          embeds: [{
-            title: 'InstaUnfollow Notification',
-            description: message,
-            color: color,
-            timestamp: new Date().toISOString()
-          }]
-        })
-      });
-    } catch (e) { console.error('Discord webhook failed', e); }
+      new Notification(title, { body, icon: 'https://www.instagram.com/static/images/ico/favicon-192.png/68d99ba29cc8.png' });
+    } catch (e) { /* notifications not supported */ }
   };
+
+  const requestNotificationPermission = async () => {
+    if (!('Notification' in window)) return;
+    if (Notification.permission === 'granted') {
+      state._notificationsGranted = true;
+    } else if (Notification.permission !== 'denied') {
+      const result = await Notification.requestPermission();
+      state._notificationsGranted = result === 'granted';
+    }
+  };
+
+  // Reserved for future multi-platform notification system (Discord, Telegram, etc.)
+  // const fireDiscordWebhook = async (message, color = 65280) => { ... };
 
   // ============================================
   // IndexedDB Manager — Historical Snapshots
@@ -400,6 +400,28 @@
         const req = this.db.transaction('snapshots', 'readonly')
           .objectStore('snapshots').index('userId').getAll(userId);
         req.onsuccess = e => resolve(e.target.result.sort((a, b) => b.timestamp - a.timestamp));
+        req.onerror = e => reject(e);
+      });
+    },
+    async deleteSnapshotsOlderThan(cutoff) {
+      if (!this.db) await this.init();
+      return new Promise((resolve, reject) => {
+        const tx = this.db.transaction('snapshots', 'readwrite');
+        const store = tx.objectStore('snapshots');
+        const index = store.index('timestamp');
+        const range = IDBKeyRange.upperBound(cutoff);
+        const req = index.openCursor(range);
+        let deleted = 0;
+        req.onsuccess = e => {
+          const cursor = e.target.result;
+          if (cursor) {
+            store.delete(cursor.primaryKey);
+            deleted++;
+            cursor.continue();
+          } else {
+            resolve(deleted);
+          }
+        };
         req.onerror = e => reject(e);
       });
     },
@@ -544,7 +566,7 @@
         if (myTasks.length === 0) return;
         const task = myTasks[0];
         if (!LimitGuardian.check()) {
-          fireDiscordWebhook('Action queue paused: 24h limit reached.', 16711680);
+          sendDesktopNotification('Action Queue', 'Queue paused: 24h action limit reached.');
           state.settings.enableQueue = false;
           Storage.set(CONFIG.SETTINGS_KEY, state.settings);
           showToast('Queue auto-paused: Action limit reached', 'error');
@@ -557,7 +579,7 @@
           LimitGuardian.record();
           const newQ = q.filter(t => t.targetId !== task.targetId);
           Storage.set(CONFIG.QUEUE_KEY, newQ);
-          if (newQ.length === 0) fireDiscordWebhook('Action queue completed.');
+          if (newQ.length === 0) sendDesktopNotification('Action Queue', 'All queued actions completed.');
           await sleep(randomDelay(state.settings.unfollowDelay));
           renderApp();
         } catch (e) { console.error('Queue task failed', e); }
@@ -623,6 +645,17 @@
     showToast(`Enrichment complete: ${state.enrichDone} users enriched`, 'success');
   }
 
+  async function cleanupOldSnapshots() {
+    const cutoff = Date.now() - getRetentionMs();
+    const deleted = await IDB.deleteSnapshotsOlderThan(cutoff);
+    if (deleted > 0) {
+      const days = state.settings.snapshotRetentionDays || 30;
+      console.log(`[Retention] Cleaned ${deleted} snapshot(s) older than ${days} days`);
+      showToast(`Cleaned ${deleted} old snapshot(s) (retention: ${days}d)`, 'info');
+    }
+    return deleted;
+  }
+
   async function mergeEnrichedData() {
     const allUsers = [...state.following, ...state.followers];
     if (allUsers.length === 0) return;
@@ -665,6 +698,7 @@
     scanHistory: [],
     paused: false,
     settings: Storage.get(CONFIG.SETTINGS_KEY, CONFIG.DEFAULT_SETTINGS),
+    _notificationsGranted: false,
     showSettings: false,
     toast: null,
     error: null,
@@ -785,7 +819,7 @@
         el('div', { className: 'iu-brand' }, [
           el('div', { className: 'iu-logo' }, ['>']),
           el('div', {}, [
-            el('div', { className: 'iu-title' }, ['UNFOLLOWERS v4']),
+            el('div', { className: 'iu-title' }, ['UNFOLLOWERS v4.1']),
             el('div', { className: 'iu-subtitle' }, ['Relationship Analysis Engine'])
           ])
         ]),
@@ -833,7 +867,7 @@
         el('input', {
           className: 'iu-input iu-input-lg', style: 'width: 100%; text-align: center;', type: 'text',
           value: state.targetUsername,
-          onInput: e => { state.targetUsername = e.target.value.replace(/[@\s]/g, ''); renderApp(); }
+          onInput: e => { state.targetUsername = e.target.value.replace(/[@\s]/g, ''); }
         })
       ]),          el('div', { className: 'iu-section' }, [
             el('h3', { className: 'iu-section-title' }, ['SCAN MODE']),
@@ -1094,6 +1128,7 @@
           const selIdx = state.snapshotSelection.indexOf(s.id);
           return el('label', {
             className: 'iu-user-item',
+            onClick: () => toggleSnapshotSelection(s.id),
             style: `margin-bottom:8px;display:flex;align-items:center;cursor:pointer;${isSelected ? 'border-color:var(--color-accent);box-shadow:0 0 10px var(--color-accent-glow);' : ''}`
           }, [
             el('div', { style: 'flex:1;' }, [
@@ -1251,7 +1286,7 @@
         el('form', { className: 'iu-modal-body', onSubmit: saveSettings }, [
           settingField('searchDelay', 'Search Delay (ms)', 500, 10000, 'number'),
           settingField('unfollowDelay', 'Unfollow Delay (ms)', 1000, 30000, 'number'),
-          settingField('discordWebhookUrl', 'Discord Webhook URL', 0, 0, 'text'),
+          settingField('snapshotRetentionDays', 'Snapshot Retention (days)', 1, 365, 'number'),
           el('label', { className: 'iu-filter-item' }, [
             el('input', { type: 'checkbox', name: 'enableQueue', className: 'iu-checkbox', checked: state.settings.enableQueue }),
             el('span', {}, ['Enable Background Queue'])
@@ -1360,7 +1395,7 @@
     state.settings = {
       searchDelay: +fd.get('searchDelay'),
       unfollowDelay: +fd.get('unfollowDelay'),
-      discordWebhookUrl: fd.get('discordWebhookUrl') || '',
+      snapshotRetentionDays: +fd.get('snapshotRetentionDays'),
       enableQueue: fd.get('enableQueue') === 'on',
       autoWhitelistVerified: fd.get('autoWhitelistVerified') === 'on',
       autoWhitelistPrivate: fd.get('autoWhitelistPrivate') === 'on'
@@ -1474,7 +1509,7 @@
       renderApp();
       const modeLabel = state.scanMode.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
       showToast(`${modeLabel} scan complete! Found ${state.results.length} accounts`, 'success');
-      fireDiscordWebhook(`${modeLabel} scan for @${state.targetUser.username}: ${state.results.length} results.`);
+      sendDesktopNotification('Scan Complete', `${modeLabel} scan for @${state.targetUser.username}: ${state.results.length} results.`);
     } catch (e) {
       showToast('Scan failed: ' + e.message, 'error');
     }
@@ -1526,6 +1561,8 @@
     const app = el('div', { className: 'iu-app' });
     document.body.appendChild(app);
     await IDB.init();
+    await cleanupOldSnapshots();
+    await requestNotificationPermission();
     QueueManager.start();
     renderApp();
   }
