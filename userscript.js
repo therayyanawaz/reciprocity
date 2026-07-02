@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Instagram Unfollowers
 // @namespace    https://instagram.com/
-// @version      5.0
+// @version      5.1
 // @description  Analyze Instagram following/follower relationships and identify non-reciprocal follows
 // @author       therayyanawaz
 // @match        https://www.instagram.com/*
