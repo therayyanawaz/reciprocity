@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         Instagram Unfollowers
+// @name         Reciprocity
 // @namespace    https://instagram.com/
 // @version      5.1
 // @description  Analyze Instagram following/follower relationships and identify non-reciprocal follows
@@ -9,7 +9,7 @@
 // ==/UserScript==
 
 /**
- * Instagram Unfollowers v5 — Pure minimal dark rebuild.
+ * Reciprocity v5 — Pure minimal dark rebuild.
  * Full UI/render rewrite. API + IndexedDB + Queue contracts preserved
  * so existing user data (whitelist, settings, snapshots, queue) survives.
  */
@@ -41,9 +41,9 @@
       --iu-accent:  #f5f5f5;
       --iu-accent-ink: #0a0a0a;
 
-      --iu-good:    #a3a3a3;
-      --iu-warn:    #a3a3a3;
-      --iu-bad:     #d4d4d4;
+      --iu-good:    #7ee2b8;
+      --iu-warn:    #ff9a3d;
+      --iu-bad:     #ff8a8a;
 
       --iu-r:       6px;
       --iu-r-lg:    10px;
@@ -317,6 +317,79 @@
     .iu-target-bar .iu-btn-primary {
       padding: 0 20px;
       font-size: 13px;
+    }
+
+    /* ---------- Search results dropdown ---------- */
+    .iu-search-wrap {
+      position: relative;
+    }
+    .iu-search-results {
+      position: absolute;
+      top: calc(100% + 4px);
+      left: 0; right: 0;
+      background: var(--iu-bg-3);
+      border: 1px solid var(--iu-line-2);
+      border-radius: var(--iu-r);
+      max-height: 340px;
+      overflow-y: auto;
+      z-index: 100;
+      animation: iu-fade 120ms var(--iu-ease);
+    }
+    .iu-search-result {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 12px;
+      cursor: pointer;
+      transition: background 120ms var(--iu-ease);
+      border-bottom: 1px solid var(--iu-line);
+    }
+    .iu-search-result:last-child { border-bottom: 0; }
+    .iu-search-result:hover { background: var(--iu-bg-4); }
+    .iu-search-result .iu-avatar {
+      width: 32px; height: 32px;
+      flex-shrink: 0;
+    }
+    .iu-search-result-meta {
+      flex: 1;
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+    .iu-search-result-name {
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--iu-ink);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .iu-search-result-sub {
+      font-size: 11px;
+      color: var(--iu-ink-3);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .iu-search-result-followers {
+      font-family: var(--iu-mono);
+      font-size: 10px;
+      color: var(--iu-ink-4);
+      flex-shrink: 0;
+    }
+    .iu-search-empty {
+      padding: 16px 12px;
+      text-align: center;
+      color: var(--iu-ink-4);
+      font-size: 12px;
+    }
+    .iu-search-loading {
+      padding: 16px;
+      text-align: center;
+    }
+    .iu-search-loading .iu-queue-spin {
+      display: inline-block;
     }
 
     /* ---------- Mode grid ---------- */
@@ -779,10 +852,11 @@
       color: var(--iu-ink-2);
     }
     .iu-queue-time { color: var(--iu-ink-3); flex-shrink: 0; }
-    .iu-ql-ok  { color: #7ee2b8; }
-    .iu-ql-fail{ color: #ff8a8a; }
-    .iu-ql-run { color: var(--iu-ink); }
+    .iu-ql-ok    { color: #7ee2b8; }
+    .iu-ql-fail  { color: #ff8a8a; }
+    .iu-ql-run   { color: var(--iu-ink); }
     .iu-ql-error { color: #ff6a6a; }
+    .iu-ql-info  { color: var(--iu-ink-3); }
     .iu-queue-ctrls {
       display: flex; gap: 6px; margin-top: 12px;
       padding-top: 10px; border-top: 1px solid var(--iu-line-2);
@@ -912,13 +986,14 @@
     remove: k => localStorage.removeItem(k)
   };
 
+  const escCSV = s => `"${String(s ?? '').replace(/"/g, '""')}"`;
   const downloadCSV = users => {
     const headers = ['Username','Full Name','User ID','Profile URL','Verified','Private','Followers','Following','Ratio'];
     const rows = users.map(u => {
       const has = u.enriched;
       const ratio = has && u.following_count > 0 ? (u.follower_count / u.following_count).toFixed(2) : 'N/A';
       return [
-        u.username, `"${u.full_name || ''}"`, u.id, `https://instagram.com/${u.username}`,
+        u.username, escCSV(u.full_name), u.id, `https://instagram.com/${u.username}`,
         u.is_verified, u.is_private,
         has ? (u.follower_count || 0) : 'N/A',
         has ? (u.following_count || 0) : 'N/A',
@@ -1215,11 +1290,43 @@
       };
     },
 
+    async searchUsers(query) {
+      if (!query || query.length < 2) return [];
+      try {
+        const res = await fetch(`https://www.instagram.com/api/v1/users/search/?q=${encodeURIComponent(query)}&count=20`, {
+          headers: {
+            'x-ig-app-id': '936619743392459',
+            'x-asbd-id': '129477',
+            'x-requested-with': 'XMLHttpRequest',
+            'x-csrftoken': this.csrf
+          },
+          credentials: 'include'
+        });
+        if (!res.ok) return [];
+        const data = await res.json();
+        if (data.status !== 'ok') return [];
+        return (data.users || []).map(u => ({
+          id: String(u.pk),
+          username: u.username,
+          full_name: u.full_name || '',
+          profile_pic_url: u.profile_pic_url,
+          is_private: !!u.is_private,
+          is_verified: !!u.is_verified,
+          follower_count: u.follower_count || 0
+        }));
+      } catch (e) {
+        console.warn('[IU] searchUsers failed', e);
+        return [];
+      }
+    },
+
     async _fetchFriendshipList(userId, kind, cursor = null) {
       // Instagram deprecated the old graphql query_hash endpoints (they now 401/403).
       // Use the v1 friendships endpoint and normalize into the legacy {edges,page_info} shape.
       const params = new URLSearchParams({ count: '50' });
       if (cursor) params.set('max_id', cursor);
+      // Send same parameters Instagram's own UI sends for complete results
+      params.set('search_surface', 'follow_list_page');
       const url = `https://www.instagram.com/api/v1/friendships/${userId}/${kind}/?${params.toString()}`;
       let res;
       try {
@@ -1253,7 +1360,8 @@
         page_info: {
           has_next_page: !!data.next_max_id,
           end_cursor: data.next_max_id || null
-        }
+        },
+        _pageCount: users.length
       };
     },
 
@@ -1279,7 +1387,11 @@
               : { 'content-type': 'application/x-www-form-urlencoded', 'x-csrftoken': this.csrf },
             credentials: 'include'
           });
-          if (res.ok) return true;
+          if (res.ok) {
+            const data = await res.json().catch(() => null);
+            if (data && data.status === 'ok' && !data.spam) return true;
+            console.warn('[IU] unfollow soft-blocked', userId, data);
+          }
         } catch {}
       }
       return false;
@@ -1299,8 +1411,9 @@
             credentials: 'include'
           });
           if (res.ok) {
-            const txt = await res.text().catch(() => '');
-            if (!txt || !/login|error/i.test(txt.slice(0, 200))) return true;
+            const data = await res.json().catch(() => null);
+            if (data && data.status === 'ok' && !data.spam) return true;
+            console.warn('[IU] removeFollower soft-blocked', userId, data);
           }
         } catch {}
       }
@@ -1718,6 +1831,7 @@
     enricherLoop();
   }
   async function enricherLoop() {
+    let enriched = 0, failures = 0;
     while (state.enrichQueue.length > 0) {
       if (!state.enriching) break;
       const uid = state.enrichQueue.shift();
@@ -1728,10 +1842,15 @@
           u.follower_count = d.follower_count;
           u.following_count = d.following_count;
           u.enriched = true;
+          enriched++;
           const ex = await IDB.getEnriched(state.targetUser.id) || { users: {} };
           ex.users[u.id] = { follower_count: d.follower_count, following_count: d.following_count };
           await IDB.saveEnriched(state.targetUser.id, { users: ex.users });
-        } catch { /* skip */ }
+        } catch {
+          failures++;
+        }
+      } else {
+        enriched++;
       }
       state.enrichDone++;
       renderApp();
@@ -1739,7 +1858,8 @@
     }
     state.enriching = false;
     renderApp();
-    showToast(`Enrichment complete: ${state.enrichDone} users`, 'success');
+    const msg = `Enrichment complete: ${enriched} enriched${failures ? ` · ${failures} failed` : ''}`;
+    showToast(msg, failures ? 'warn' : 'success');
   }
   async function cleanupOldSnapshots() {
     const deleted = await IDB.deleteSnapshotsOlderThan(Date.now() - getRetentionMs());
@@ -1788,7 +1908,9 @@
     enriching: false, enrichQueue: [], enrichDone: 0, enrichTotal: 0,
     scanPhase: '',
     queueCurrent: null, queueLog: [], queueOpen: false,
-    actionProgress: null   // { label, current, done, total } | null
+    actionProgress: null,   // { label, current, done, total } | null
+    searchResults: null,     // [{ id, username, full_name, profile_pic_url, is_private, is_verified, follower_count }] | null
+    searchResultsLoading: false
   };
 
   function queueLog(msg, type = 'info') {
@@ -2012,6 +2134,18 @@
         Storage.set(CONFIG.STORAGE_KEY, state.whitelist);
       }
 
+      // If scan was stopped early, discard partial data
+      if (state._stopped) {
+        state._stopped = false;
+        state.results = [];
+        state.following = [];
+        state.followers = [];
+        state.scanPhase = '';
+        addScanLog('⚠ Scan stopped — partial data discarded');
+        renderApp();
+        return;
+      }
+
       state.pct = 100;
       state.scanPhase = 'Saving';
       if (needG && state.following.length) { await IDB.saveSnapshot(state.targetUser.id, 'following', state.following); addScanLog(`Saved following snapshot (${state.following.length})`); }
@@ -2045,12 +2179,22 @@
       : ['following','non_followers','mutuals','fans','deactivated'];
     const isCombo = combos.includes(state.scanMode);
     let cursor = null, hasNext = true;
+    let emptyPageCount = 0;
     const bucket = isG ? state.following : state.followers;
     while (hasNext && state.status === 'scanning') {
       const data = await API[method](state.targetUser.id, cursor);
+      const pageCount = data._pageCount || 0;
       data.edges.forEach(e => bucket.push(e.node));
       hasNext = data.page_info.has_next_page;
       cursor = data.page_info.end_cursor;
+      // Stop if we get an empty page with no cursor — nothing more to fetch
+      if (pageCount === 0 && !cursor) hasNext = false;
+      // If 3 consecutive empty pages, stop — Instagram likely blocked further pagination
+      if (pageCount === 0) { emptyPageCount++; } else { emptyPageCount = 0; }
+      if (emptyPageCount >= 3) {
+        console.warn('[IU] fetchList stopped: 3 consecutive empty pages (Instagram pagination limit reached)');
+        hasNext = false;
+      }
       const total = isCombo ? (state.totalCount || 1) : ((isG ? state.targetUser.following_count : state.targetUser.follower_count) || 1);
       const fetched = isCombo ? (state.following.length + state.followers.length) : bucket.length;
       state.pct = Math.floor((fetched / total) * 100);
@@ -2059,13 +2203,20 @@
       await sleep(randomDelay(state.settings.searchDelay));
     }
     addScanLog(`Fetched ${bucket.length} ${kind}`);
+    // Warn if fetched count is significantly below expected
+    const expected = isG ? state.targetUser?.following_count : state.targetUser?.follower_count;
+    if (expected && bucket.length < expected * 0.9) {
+      addScanLog(`⚠ Only fetched ${bucket.length} of ~${expected} ${kind} — Instagram may have limited results`);
+      showToast(`Only fetched ${bucket.length} of ~${expected} ${kind}`, 'warn');
+    }
   }
 
   function stopScan() {
     state.status = 'initial';
     state.pct = 0;
     state.scanPhase = '';
-    showToast('Scan stopped', 'info');
+    state._stopped = true;
+    showToast('Scan stopped — partial data discarded', 'info');
     renderApp();
   }
 
@@ -2127,9 +2278,9 @@
       el('div', { className: 'iu-brand' }, [
         el('div', { className: 'iu-brand-mark' }, ['IU']),
         el('div', { style: 'display:flex; flex-direction:column; gap:2px;' }, [
-          el('div', { className: 'iu-brand-name' }, ['Instagram Unfollowers']),
+          el('div', { className: 'iu-brand-name' }, ['Reciprocity']),
           el('div', { className: 'iu-brand-sub' }, [
-            has && state.targetUser ? `@${state.targetUser.username}` : 'v5.0'
+            has && state.targetUser ? `@${state.targetUser.username}` : 'v5.1'
           ])
         ])
       ]),
@@ -2162,19 +2313,76 @@
     const wrap = el('div', { className: 'iu-start' });
 
     wrap.appendChild(el('div', { className: 'iu-hero' }, [
-      el('div', { className: 'iu-hero-eyebrow' }, ['v5.0  ·  Read-only analysis']),
+      el('div', { className: 'iu-hero-eyebrow' }, ['v5.1  ·  Analyze any public account']),
       el('h1', { className: 'iu-hero-title' }, ['See who follows you back, and who doesn\u2019t.']),
       el('p', { className: 'iu-hero-sub' }, ['Analyze any public Instagram account. Detect non-followers, mutuals, fans, and disappearances over time. Everything runs in your browser — no data leaves this page.']),
-      el('div', { className: 'iu-target-bar' }, [
-        el('input', {
-          className: 'iu-input',
-          type: 'text',
-          placeholder: 'instagram username',
-          value: state.targetUsername,
-          onkeydown: e => { if (e.key === 'Enter') loadTargetProfile(); },
-          oninput: e => { state.targetUsername = e.target.value.trim().replace(/^@/, ''); }
-        }),
-        el('button', { className: 'iu-btn iu-btn-primary', onclick: loadTargetProfile }, ['Run analysis'])
+      el('div', { className: 'iu-search-wrap' }, [
+        el('div', { className: 'iu-target-bar' }, [
+          el('input', {
+            className: 'iu-input',
+            type: 'text',
+            placeholder: 'Search Instagram profiles...',
+            value: state.targetUsername,
+            onkeydown: e => {
+              if (e.key === 'Enter') loadTargetProfile();
+              if (e.key === 'Escape') { state.searchResults = null; renderApp(); }
+            },
+            oninput: e => {
+              state.targetUsername = e.target.value.trim().replace(/^@/, '');
+              // Debounce search
+              if (state._searchTimeout) clearTimeout(state._searchTimeout);
+              if (state.targetUsername.length < 2) {
+                state.searchResults = null;
+                state.searchResultsLoading = false;
+                renderApp();
+                return;
+              }
+              state.searchResultsLoading = true;
+              state.searchResults = null;
+              renderApp();
+              state._searchTimeout = setTimeout(async () => {
+                const q = state.targetUsername;
+                const res = await API.searchUsers(q);
+                if (state.targetUsername === q) {
+                  state.searchResults = res;
+                  state.searchResultsLoading = false;
+                  renderApp();
+                }
+              }, 350);
+            }
+          }),
+          el('button', { className: 'iu-btn iu-btn-primary', onclick: loadTargetProfile }, ['Run analysis'])
+        ]),
+        state.searchResultsLoading && el('div', { className: 'iu-search-results' }, [
+          el('div', { className: 'iu-search-loading' }, [
+            el('div', { className: 'iu-queue-spin', style: 'width:16px; height:16px; margin:0 auto;' })
+          ])
+        ]),
+        state.searchResults && state.searchResults.length > 0 && el('div', { className: 'iu-search-results' },
+          state.searchResults.map(u => el('div', {
+            className: 'iu-search-result',
+            onclick: () => {
+              state.targetUsername = u.username;
+              state.searchResults = null;
+              state.searchResultsLoading = false;
+              loadTargetProfile();
+            }
+          }, [
+            el('div', { className: 'iu-avatar' }, [el('img', { src: u.profile_pic_url, alt: '', loading: 'lazy', onerror: function(){ this.style.display='none'; } })]),
+            el('div', { className: 'iu-search-result-meta' }, [
+              el('div', { className: 'iu-search-result-name' }, [
+                u.username,
+                u.is_verified ? ' ✓' : '',
+                u.is_private ? ' 🔒' : ''
+              ]),
+              el('div', { className: 'iu-search-result-sub' }, [u.full_name || ''])
+            ]),
+            el('div', { className: 'iu-search-result-followers' }, [`${fmtNum(u.follower_count)} followers`])
+          ]))
+        ),
+        state.searchResults && state.searchResults.length === 0 && state.targetUsername.length >= 2 && el('div', { className: 'iu-search-results' }, [
+          el('div', { className: 'iu-search-empty' }, ['No accounts found'])
+        ])
       ])
     ]));
 
@@ -2770,7 +2978,7 @@
       }
       document.body.innerHTML = '';
       document.body.style.cssText = 'margin: 0; padding: 0; background: #000;';
-      document.title = 'IU · Instagram Unfollowers';
+      document.title = 'Reciprocity — Instagram relationship analyzer';
 
       const panel = el('div', { className: 'iu-panel' }, [ el('div', { className: 'iu-app' }) ]);
       try { API.initTokens(); }                        catch (e) { console.warn('[IU] initTokens failed:', e); }
