@@ -688,8 +688,9 @@
       backdrop-filter: blur(6px);
       -webkit-backdrop-filter: blur(6px);
       z-index: 2147483200;
-      display: grid; place-items: center;
+      display: flex; align-items: center; justify-content: center;
       padding: 24px;
+      box-sizing: border-box;
     }
     .iu-modal {
       width: min(520px, 100%);
@@ -697,18 +698,27 @@
       border: 1px solid var(--iu-line-2);
       border-radius: var(--iu-r-lg);
       display: flex; flex-direction: column;
-      max-height: 90vh;
+      max-height: 100%;
+      overflow: hidden;
       animation: iu-fade 200ms var(--iu-ease);
     }
     .iu-modal-head {
       padding: 20px 24px;
       border-bottom: 1px solid var(--iu-line);
       display: flex; align-items: center; justify-content: space-between;
+      flex-shrink: 0;
+    }
+    .iu-modal > form {
+      display: flex; flex-direction: column;
+      flex: 1; min-height: 0;
+      overflow: hidden;
     }
     .iu-modal-title { font-size: 14px; font-weight: 600; color: var(--iu-ink); letter-spacing: -0.01em; }
     .iu-modal-body {
       padding: 20px 24px;
-      overflow: auto;
+      overflow-y: auto;
+      flex: 1;
+      min-height: 0;
       display: flex; flex-direction: column;
       gap: 16px;
     }
@@ -3037,6 +3047,7 @@
           el('div', { className: 'iu-modal-title' }, [title]),
           el('button', {
             className: 'iu-btn iu-btn-ghost',
+            type: 'button',
             onclick: () => { state.previewModal = null; renderApp(); }
           }, ['✕'])
         ]),
@@ -3060,10 +3071,12 @@
         el('div', { className: 'iu-modal-foot' }, [
           el('button', {
             className: 'iu-btn',
+            type: 'button',
             onclick: () => { state.previewModal = null; renderApp(); }
           }, ['Cancel']),
           el('button', {
             className: 'iu-btn iu-btn-primary',
+            type: 'button',
             onclick: () => {
               const cb = onConfirm;
               state.previewModal = null;
