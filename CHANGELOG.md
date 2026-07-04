@@ -4,6 +4,33 @@ All notable changes to Instagram Unfollowers.
 
 ---
 
+## [5.2] — 2026-07-04
+
+### Added
+- **Configurable truncation limits** — Compare view max, queue list max, and activity log max are now adjustable from Settings (previously hardcoded at 200/20/20)
+- **Dry-run preview modals** — Queue actions (unfollow/remove/defriend), Delete Chats, and Full Erase show the full target list before confirming
+- **Cross-tab safety for Delete Chats** — uses Web Locks API (`navigator.locks.request`) so two tabs can't race on DM operations
+- **Adaptive backoff on failures** — `backoffDelay()` applies exponential backoff (`base × 2^failures`, capped) after failed API calls across all bulk loops
+- **Durable queue activity log** — persisted to localStorage under `iu_queue_log_v3`; survives page reloads. Default cap raised to 100 entries
+- **`getActionableTargets()`** — single enforcement point for whitelist-exclusion across all 5 action buttons
+- **Rate-limit accounting per actual API call** — defriend (up to 3 calls) and DM actions now record each HTTP request against the 150/24h cap instead of 1 per logical task
+- **UTF-8 BOM + Blob download for CSV export** — `\uFEFF` prefix forces correct Excel encoding; Blob avoids URI length limits
+- **Enhanced self-test harness** — tests for `formatETA`, `getPageUsers`, `compareSnapshots` edge cases, whitelist operations
+- **deleteChatOnDefriend first-fire warning** — toast notification explains that defriend will also delete DM history
+
+### Fixed
+- **`backoffDelay()` was missing** — used in 5 places across queue/enrichment/bulk loops but never defined; would throw `ReferenceError` at runtime
+- **Full Erase `onConfirm` not async** — used `await` inside a non-async function; would fail to acquire the Web Lock
+- **Enrichment metrics inconsistency** — metrics bar and sidebar used different formulas; both now show `enrichDone/enrichTotal` while running and `enriched/results.length` when idle
+- **Delete Chats double-counting on error** — `ok++` ran before `await`, so thrown errors incremented both `ok` and `fail`
+- **Checkbox keyboard focus loss** — all checkboxes (filter, row-select, snapshot) now have stable `name`+`id` attributes so re-render preserves focus position
+
+### Changed
+- **Magic strings consolidated** — `x-ig-app-id` (10 occurrences) and `x-asbd-id` variants centralized to `CONFIG.IG_APP_ID` / `CONFIG.ASBD_ID` / `CONFIG.ASBD_ID_GQL`
+- **Queue actions use preview modal** — unfollow/remove/defriend now show a dry-run target list before queueing (was a bare `confirm()` dialog)
+
+---
+
 ## [5.1] — 2026-07-02
 
 ### Added

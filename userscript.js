@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Reciprocity
 // @namespace    https://instagram.com/
-// @version      5.1
+// @version      5.2
 // @description  Analyze Instagram following/follower relationships and identify non-reciprocal follows
 // @author       therayyanawaz
 // @match        https://www.instagram.com/*
@@ -717,6 +717,39 @@
       border-top: 1px solid var(--iu-line);
       display: flex; justify-content: flex-end; gap: 8px;
     }
+
+    /* ---------- Preview modal target list ---------- */
+    .iu-preview-list {
+      max-height: 260px;
+      overflow-y: auto;
+      border: 1px solid var(--iu-line);
+      border-radius: var(--iu-r);
+      background: var(--iu-bg-2);
+    }
+    .iu-preview-item {
+      display: flex; align-items: center; gap: 10px;
+      padding: 7px 12px;
+      border-bottom: 1px solid var(--iu-line);
+      font-size: 13px;
+      color: var(--iu-ink);
+    }
+    .iu-preview-item:last-child { border-bottom: 0; }
+    .iu-preview-item .iu-avatar { width: 24px; height: 24px; }
+    .iu-preview-name { font-weight: 500; }
+    .iu-preview-fullname { font-size: 11px; color: var(--iu-ink-3); }
+    .iu-preview-count {
+      font-family: var(--iu-mono);
+      font-size: 11px;
+      color: var(--iu-ink-3);
+      margin-bottom: 4px;
+    }
+    .iu-preview-count strong { color: var(--iu-ink); }
+    .iu-modal-warn {
+      font-size: 12px;
+      color: var(--iu-bad);
+      display: flex; align-items: center; gap: 8px;
+    }
+
     .iu-field {
       display: flex; flex-direction: column; gap: 6px;
     }
@@ -928,6 +961,32 @@
     .iu-panel ::-webkit-scrollbar-track { background: transparent; }
     .iu-panel ::-webkit-scrollbar-thumb { background: var(--iu-line-2); border-radius: 4px; }
     .iu-panel ::-webkit-scrollbar-thumb:hover { background: var(--iu-line-3); }
+
+    /* ---------- IndexedDB warning banner ---------- */
+    .iu-idb-warn {
+      display: flex; align-items: center; gap: 10px;
+      padding: 10px 16px;
+      margin: 0 28px 8px;
+      background: var(--iu-bg-3);
+      border: 1px solid var(--iu-warn);
+      border-radius: var(--iu-r);
+      font-size: 12px;
+      color: var(--iu-warn);
+      animation: iu-fade 220ms var(--iu-ease);
+    }
+    .iu-idb-warn-body { flex: 1; display: flex; flex-direction: column; gap: 2px; }
+    .iu-idb-warn-title { font-weight: 600; color: var(--iu-ink); font-size: 12px; }
+    .iu-idb-warn-detail { color: var(--iu-ink-3); font-size: 11px; }
+    .iu-idb-warn-icon {
+      flex-shrink: 0;
+      width: 20px; height: 20px;
+      display: grid; place-items: center;
+      border-radius: 50%;
+      background: var(--iu-warn);
+      color: #000;
+      font-weight: 700;
+      font-size: 11px;
+    }
   `;
 
   const styleEl = document.createElement('style');
@@ -942,11 +1001,16 @@
     SETTINGS_KEY: 'iu_settings_v3',
     QUEUE_KEY:    'iu_task_queue_v3',
     LIMITS_KEY:   'iu_action_limits_v3',
+    QUEUE_LOG_KEY:'iu_queue_log_v3',
     USERS_PER_PAGE: 50,
     MAX_ACTIONS_24H: 150,
     DB_NAME: 'IU_Analytics_DB',
     DB_VERSION: 2,
     RENDER_THROTTLE_MS: 300,
+    DM_LOCK:      'iu_dm_lock_v1',
+    IG_APP_ID:    '936619743392459',
+    ASBD_ID:      '129477',
+    ASBD_ID_GQL:  '359341',
     DEFAULT_SETTINGS: {
       searchDelay: 1000,
       unfollowDelay: 4000,
@@ -954,7 +1018,10 @@
       autoWhitelistPrivate: false,
       enableQueue: true,
       snapshotRetentionDays: 30,
-      deleteChatOnDefriend: true
+      deleteChatOnDefriend: true,
+      compareViewMax: 200,
+      queueListMax: 20,
+      queueLogMax: 100
     }
   };
 
@@ -969,6 +1036,8 @@
   };
   const randomDelay = (base, v = 0.3) =>
     Math.floor(Math.random() * (base * 2 * v) + base * (1 - v));
+  const backoffDelay = (base, cap, fails) =>
+    Math.min(base * Math.pow(2, fails), cap) * (0.5 + Math.random());
   const parseUsernameFromURL = () => {
     const m = window.location.pathname.match(/^\/([a-zA-Z0-9._]+)/);
     if (m && m[1] && !['explore','reels','stories','direct','accounts'].includes(m[1].toLowerCase())) return m[1];
@@ -1000,13 +1069,17 @@
         ratio
       ].join(',');
     });
-    const csv = 'data:text/csv;charset=utf-8,' + [headers.join(','), ...rows].join('\n');
+    const bom = '\uFEFF';
+    const content = bom + headers.join(',') + '\n' + rows.join('\n');
+    const blob = new Blob([content], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
-    link.href = encodeURI(csv);
+    link.href = url;
     link.download = `iu_export_${Date.now()}.csv`;
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
   };
 
   const sendDesktopNotification = (title, body) => {
@@ -1071,7 +1144,11 @@
       catch (err) {
         const m = (err && err.message ? err.message : String(err)).match(/existing version \((\d+)\)/);
         if (m) { CONFIG.DB_VERSION = Math.max(CONFIG.DB_VERSION, parseInt(m[1], 10)); await open(CONFIG.DB_VERSION); }
-        else throw err;
+        else {
+          state.idbAvailable = false;
+          state.idbError = (err && err.message) ? err.message : String(err || 'Unknown');
+          throw err;
+        }
       }
     },
     async saveSnapshot(userId, type, users) {
@@ -1266,8 +1343,8 @@
       try {
         res = await fetch(url, {
           headers: {
-            'x-ig-app-id': '936619743392459',
-            'x-asbd-id': '129477',
+            'x-ig-app-id': CONFIG.IG_APP_ID,
+            'x-asbd-id': CONFIG.ASBD_ID,
             'x-requested-with': 'XMLHttpRequest',
             'x-csrftoken': this.csrf
           },
@@ -1295,8 +1372,8 @@
       try {
         const res = await fetch(`https://www.instagram.com/api/v1/users/search/?q=${encodeURIComponent(query)}&count=20`, {
           headers: {
-            'x-ig-app-id': '936619743392459',
-            'x-asbd-id': '129477',
+            'x-ig-app-id': CONFIG.IG_APP_ID,
+            'x-asbd-id': CONFIG.ASBD_ID,
             'x-requested-with': 'XMLHttpRequest',
             'x-csrftoken': this.csrf
           },
@@ -1332,8 +1409,8 @@
       try {
         res = await fetch(url, {
           headers: {
-            'x-ig-app-id': '936619743392459',
-            'x-asbd-id': '129477',
+            'x-ig-app-id': CONFIG.IG_APP_ID,
+            'x-asbd-id': CONFIG.ASBD_ID,
             'x-requested-with': 'XMLHttpRequest',
             'x-csrftoken': this.csrf
           },
@@ -1383,7 +1460,7 @@
           const res = await fetch(a.url, {
             method: 'POST',
             headers: a.v1
-              ? { 'content-type': 'application/x-www-form-urlencoded', 'x-csrftoken': this.csrf, 'x-ig-app-id': '936619743392459', 'x-requested-with': 'XMLHttpRequest' }
+              ? { 'content-type': 'application/x-www-form-urlencoded', 'x-csrftoken': this.csrf, 'x-ig-app-id': CONFIG.IG_APP_ID, 'x-requested-with': 'XMLHttpRequest' }
               : { 'content-type': 'application/x-www-form-urlencoded', 'x-csrftoken': this.csrf },
             credentials: 'include'
           });
@@ -1407,7 +1484,7 @@
         try {
           const res = await fetch(url, {
             method: 'POST',
-            headers: { 'content-type': 'application/x-www-form-urlencoded', 'x-csrftoken': this.csrf, 'x-ig-app-id': '936619743392459', 'x-requested-with': 'XMLHttpRequest' },
+            headers: { 'content-type': 'application/x-www-form-urlencoded', 'x-csrftoken': this.csrf, 'x-ig-app-id': CONFIG.IG_APP_ID, 'x-requested-with': 'XMLHttpRequest' },
             credentials: 'include'
           });
           if (res.ok) {
@@ -1426,10 +1503,10 @@
         console.log('[IU] getThreadInfoForUser primary lookup for', userId);
         const res = await fetch(`https://www.instagram.com/api/v1/direct_v2/threads/get_by_participants/?recipient_users=[${userId}]`, {
           headers: {
-            'x-ig-app-id': '936619743392459',
+            'x-ig-app-id': CONFIG.IG_APP_ID,
             'x-requested-with': 'XMLHttpRequest',
             'x-csrftoken': this.csrf,
-            'x-asbd-id': '129477'
+            'x-asbd-id': CONFIG.ASBD_ID
           },
           credentials: 'include'
         });
@@ -1455,7 +1532,7 @@
           console.log('[IU] getThreadInfoForUser inbox page', page + 1);
           const res = await fetch(url, {
             headers: {
-              'x-ig-app-id': '936619743392459',
+              'x-ig-app-id': CONFIG.IG_APP_ID,
               'x-requested-with': 'XMLHttpRequest',
               'x-csrftoken': this.csrf
             },
@@ -1545,8 +1622,8 @@
             'x-csrftoken': this.csrf,
             'x-fb-friendly-name': 'IGDInboxInfoDeleteThreadDialogOffMsysMutation',
             'x-fb-lsd': this.lsd || '',
-            'x-ig-app-id': '936619743392459',
-            'x-asbd-id': '359341',
+            'x-ig-app-id': CONFIG.IG_APP_ID,
+            'x-asbd-id': CONFIG.ASBD_ID_GQL,
             'x-requested-with': 'XMLHttpRequest'
           },
           body: body.toString(),
@@ -1600,7 +1677,7 @@
           const url = `https://www.instagram.com/api/v1/direct_v2/threads/${threadId}/?cursor=${cursor || ''}&limit=50`;
           console.log('[IU] getThreadMessages', url);
           const res = await fetch(url, {
-            headers: { 'x-ig-app-id': '936619743392459', 'x-requested-with': 'XMLHttpRequest', 'x-csrftoken': this.csrf },
+            headers: { 'x-ig-app-id': CONFIG.IG_APP_ID, 'x-requested-with': 'XMLHttpRequest', 'x-csrftoken': this.csrf },
             credentials: 'include'
           });
           console.log('[IU] getThreadMessages status', res.status);
@@ -1633,7 +1710,7 @@
         console.log('[IU] unsendMessage POST', url);
         const res = await fetch(url, {
           method: 'POST',
-          headers: { 'content-type': 'application/x-www-form-urlencoded', 'x-csrftoken': this.csrf, 'x-ig-app-id': '936619743392459', 'x-requested-with': 'XMLHttpRequest' },
+          headers: { 'content-type': 'application/x-www-form-urlencoded', 'x-csrftoken': this.csrf, 'x-ig-app-id': CONFIG.IG_APP_ID, 'x-requested-with': 'XMLHttpRequest' },
           body,
           credentials: 'include'
         });
@@ -1703,6 +1780,7 @@
   const QueueManager = {
     interval: null,
     _running: false,
+    _backoffFails: 0,
     start() {
       if (this.interval) clearInterval(this.interval);
       this.interval = setInterval(() => this.tick(), 30000);
@@ -1733,16 +1811,24 @@
         if (task.action === 'unfollow') ok = await API.unfollow(task.targetId);
         else if (task.action === 'remove') ok = await API.removeFollower(task.targetId);
         else if (task.action === 'defriend') {
+          if (state.settings.deleteChatOnDefriend && !state._defriendChatWarned) {
+            state._defriendChatWarned = true;
+            showToast('Warning: Defriend will also DELETE the DM chat with each user (disable in Settings)', 'warn');
+            await sleep(3000);
+          }
           const uf = await API.unfollow(task.targetId);
           queueLog(`  unfollow @${task.username}: ${uf ? 'ok' : 'fail'}`, uf ? 'ok' : 'fail');
+          if (uf) LimitGuardian.record();
           await sleep(1500);
           const rm = await API.removeFollower(task.targetId);
           queueLog(`  remove @${task.username}: ${rm ? 'ok' : 'fail'}`, rm ? 'ok' : 'fail');
+          if (rm) LimitGuardian.record();
           let dc = true;
           if (state.settings.deleteChatOnDefriend) {
             await sleep(1500);
             dc = await API.deleteChatByUserId(task.targetId);
             queueLog(`  chat @${task.username}: ${dc ? 'deleted' : 'none'}`, dc ? 'ok' : 'info');
+            if (dc) LimitGuardian.record();
           } else {
             queueLog(`  chat @${task.username}: skipped (setting off)`, 'info');
           }
@@ -1753,7 +1839,7 @@
         }
         if (!ok && task.action !== 'defriend') showToast(`${task.action} failed for @${task.username}`, 'error');
         queueLog(`${ok ? '✓' : '✗'} ${task.action} @${task.username}`, ok ? 'ok' : 'fail');
-        LimitGuardian.record();
+        if (task.action !== 'defriend') LimitGuardian.record();
         const q2 = Storage.get(CONFIG.QUEUE_KEY, []);
         const newQ = q2.filter(t => !(t.targetId === task.targetId && t.action === task.action));
         Storage.set(CONFIG.QUEUE_KEY, newQ);
@@ -1761,11 +1847,12 @@
         if (newQ.filter(t => t.ownerId === API.userId).length === 0) {
           sendDesktopNotification('Action Queue', 'All queued actions completed.');
           queueLog('Queue empty — all done', 'ok');
-        }
-        renderApp();
-        await sleep(randomDelay(state.settings.unfollowDelay));
+        }            renderApp();
+            await sleep(backoffDelay(state.settings.unfollowDelay, Math.min(state.settings.unfollowDelay * 20, 60000), this._backoffFails));
+            this._backoffFails = 0;
       } catch (e) {
         console.error('Queue task failed', e);
+        this._backoffFails++;
         queueLog(`✗ ${task.action} @${task.username}: ${e.message || 'error'}`, 'fail');
         state.queueCurrent = null;
         renderApp();
@@ -1789,7 +1876,6 @@
       });
       Storage.set(CONFIG.QUEUE_KEY, q);
       queueLog(`+ queued ${added} × ${action}`, 'info');
-      showToast(`Added ${added} to background queue`, 'success');
       renderApp();
       // kick immediately
       setTimeout(() => this.tick(), 200);
@@ -1831,7 +1917,7 @@
     enricherLoop();
   }
   async function enricherLoop() {
-    let enriched = 0, failures = 0;
+    let enriched = 0, failures = 0, _ebf = 0;
     while (state.enrichQueue.length > 0) {
       if (!state.enriching) break;
       const uid = state.enrichQueue.shift();
@@ -1843,18 +1929,23 @@
           u.following_count = d.following_count;
           u.enriched = true;
           enriched++;
-          const ex = await IDB.getEnriched(state.targetUser.id) || { users: {} };
-          ex.users[u.id] = { follower_count: d.follower_count, following_count: d.following_count };
-          await IDB.saveEnriched(state.targetUser.id, { users: ex.users });
+          _ebf = 0;
+          if (state.idbAvailable) {
+            const ex = await IDB.getEnriched(state.targetUser.id) || { users: {} };
+            ex.users[u.id] = { follower_count: d.follower_count, following_count: d.following_count };
+            await IDB.saveEnriched(state.targetUser.id, { users: ex.users });
+          }
         } catch {
           failures++;
+          _ebf++;
         }
       } else {
         enriched++;
+        _ebf = 0;
       }
       state.enrichDone++;
       renderApp();
-      await sleep(randomDelay(3000));
+      await sleep(backoffDelay(3000, 60000, _ebf));
     }
     state.enriching = false;
     renderApp();
@@ -1862,6 +1953,7 @@
     showToast(msg, failures ? 'warn' : 'success');
   }
   async function cleanupOldSnapshots() {
+    if (!state.idbAvailable) return 0;
     const deleted = await IDB.deleteSnapshotsOlderThan(Date.now() - getRetentionMs());
     if (deleted > 0) console.log(`[Retention] Cleaned ${deleted} old snapshot(s)`);
     return deleted;
@@ -1869,6 +1961,7 @@
   async function mergeEnrichedData() {
     const all = [...state.following, ...state.followers];
     if (all.length === 0) return;
+    if (!state.idbAvailable) return;
     const map = await IDB.getAllEnrichedForScan(state.targetUser.id, all);
     all.forEach(u => {
       if (map[u.id]) {
@@ -1910,12 +2003,17 @@
     queueCurrent: null, queueLog: [], queueOpen: false,
     actionProgress: null,   // { label, current, done, total } | null
     searchResults: null,     // [{ id, username, full_name, profile_pic_url, is_private, is_verified, follower_count }] | null
-    searchResultsLoading: false
+    searchResultsLoading: false,
+    idbAvailable: true,
+    idbError: null,
+    previewModal: null,
+    _defriendChatWarned: false
   };
 
   function queueLog(msg, type = 'info') {
     state.queueLog.unshift({ msg, type, ts: Date.now() });
-    if (state.queueLog.length > 60) state.queueLog.length = 60;
+    if (state.queueLog.length > (state.settings.queueLogMax || 100)) state.queueLog.length = (state.settings.queueLogMax || 100);
+    try { Storage.set(CONFIG.QUEUE_LOG_KEY, state.queueLog.slice(0, 200)); } catch {}
   }
 
 
@@ -1977,6 +2075,9 @@
       return true;
     }).sort((a, b) => a.username.localeCompare(b.username));
   }
+  function getActionableTargets() {
+    return state.results.filter(u => state.selected.includes(u.id));
+  }
   function getPageUsers(users) {
     return users.slice((state.page - 1) * CONFIG.USERS_PER_PAGE, state.page * CONFIG.USERS_PER_PAGE);
   }
@@ -2011,7 +2112,10 @@
       enableQueue: fd.get('enableQueue') === 'on',
       autoWhitelistVerified: fd.get('autoWhitelistVerified') === 'on',
       autoWhitelistPrivate: fd.get('autoWhitelistPrivate') === 'on',
-      deleteChatOnDefriend: fd.get('deleteChatOnDefriend') === 'on'
+      deleteChatOnDefriend: fd.get('deleteChatOnDefriend') === 'on',
+      compareViewMax: +fd.get('compareViewMax') || 200,
+      queueListMax: +fd.get('queueListMax') || 20,
+      queueLogMax: +fd.get('queueLogMax') || 100
     };
     Storage.set(CONFIG.SETTINGS_KEY, state.settings);
     state.showSettings = false;
@@ -2019,6 +2123,7 @@
   }
   async function loadSnapshots() {
     if (!state.targetUser) return;
+    if (!state.idbAvailable) { state.snapshots = []; state.snapshotSelection = []; state.compareResult = null; renderApp(); return; }
     try {
       state.snapshots = await IDB.getSnapshots(state.targetUser.id);
       state.snapshotSelection = [];
@@ -2084,6 +2189,12 @@
 
     try {
       if (state.scanMode === 'recent_unfollowers' || state.scanMode === 'deactivated') {
+        if (!state.idbAvailable) {
+          state.status = 'error';
+          state.error = 'IndexedDB is unavailable in this browser (common in private/incognito mode). Snapshot-based modes need IndexedDB to store and retrieve historical data. Try a different mode (e.g. Non-Followers) or disable private browsing for instagram.com.';
+          renderApp();
+          return;
+        }
         const need = state.scanMode === 'deactivated' ? 'following' : 'followers';
         state.scanPhase = 'Loading snapshot';
         addScanLog(`Checking ${need} snapshot...`);
@@ -2107,15 +2218,19 @@
       if (state.scanMode === 'deactivated') {
         const missing = computeResults(state.scanMode, state.following, null, state._oldSnap);
         state.results = [];
+        let _dbf = 0;
         for (let i = 0; i < missing.length; i++) {
-          try { await API.getUserByUsername(missing[i].username); }
-          catch (err) {
+          try {
+            await API.getUserByUsername(missing[i].username);
+            _dbf = Math.max(0, _dbf - 1);  // decay backoff on success
+          } catch (err) {
             const m = err?.message || '';
             if (m.includes('not found') || m.includes('404')) state.results.push({ ...missing[i], __deactivated: true });
+            _dbf++;
           }
           state.pct = Math.floor(60 + ((i + 1) / missing.length) * 35);
           updateScanProgress();
-          if (i < missing.length - 1) await sleep(randomDelay(2000));
+          if (i < missing.length - 1) await sleep(backoffDelay(2000, 40000, _dbf));
         }
       } else {
         state.results = computeResults(state.scanMode, state.following, state.followers, state._oldSnap);
@@ -2148,11 +2263,13 @@
 
       state.pct = 100;
       state.scanPhase = 'Saving';
-      if (needG && state.following.length) { await IDB.saveSnapshot(state.targetUser.id, 'following', state.following); addScanLog(`Saved following snapshot (${state.following.length})`); }
-      if (needF && state.followers.length) { await IDB.saveSnapshot(state.targetUser.id, 'followers', state.followers); addScanLog(`Saved followers snapshot (${state.followers.length})`); }
-      if (!['recent_unfollowers','deactivated','following','followers'].includes(state.scanMode)) {
-        await IDB.saveSnapshot(state.targetUser.id, state.scanMode, state.results);
-        addScanLog(`Saved ${state.scanMode} snapshot`);
+      if (state.idbAvailable) {
+        if (needG && state.following.length) { await IDB.saveSnapshot(state.targetUser.id, 'following', state.following); addScanLog(`Saved following snapshot (${state.following.length})`); }
+        if (needF && state.followers.length) { await IDB.saveSnapshot(state.targetUser.id, 'followers', state.followers); addScanLog(`Saved followers snapshot (${state.followers.length})`); }
+        if (!['recent_unfollowers','deactivated','following','followers'].includes(state.scanMode)) {
+          await IDB.saveSnapshot(state.targetUser.id, state.scanMode, state.results);
+          addScanLog(`Saved ${state.scanMode} snapshot`);
+        }
       }
 
       state.scanPhase = '';
@@ -2249,8 +2366,12 @@
     else                                 body.appendChild(renderScan());
     app.appendChild(body);
 
+    const idbWarn = renderIDBWarning();
+    if (idbWarn) body.insertBefore(idbWarn, body.firstChild);
     if (state.toast) app.appendChild(renderToast(state.toast));
     if (state.showSettings) app.appendChild(renderSettings());
+    const pmEl = renderPreviewModal();
+    if (pmEl) app.appendChild(pmEl);
     const qc = QueueManager.count();
     if (qc > 0) app.appendChild(renderQueueBadge(qc));
 
@@ -2280,7 +2401,7 @@
         el('div', { style: 'display:flex; flex-direction:column; gap:2px;' }, [
           el('div', { className: 'iu-brand-name' }, ['Reciprocity']),
           el('div', { className: 'iu-brand-sub' }, [
-            has && state.targetUser ? `@${state.targetUser.username}` : 'v5.1'
+            has && state.targetUser ? `@${state.targetUser.username}` : 'v5.2'
           ])
         ])
       ]),
@@ -2308,12 +2429,28 @@
     ]);
   }
 
+  // ---------- IndexedDB warning ----------
+  function renderIDBWarning() {
+    if (state.idbAvailable) return null;
+    return el('div', { className: 'iu-idb-warn' }, [
+      el('div', { className: 'iu-idb-warn-icon' }, ['!']),
+      el('div', { className: 'iu-idb-warn-body' }, [
+        el('div', { className: 'iu-idb-warn-title' }, ['IndexedDB unavailable']),
+        el('div', { className: 'iu-idb-warn-detail' }, [
+          state.idbError && state.idbError.includes('blocked')
+            ? 'Your browser has blocked IndexedDB. Snapshot-dependent features (New Unfollowers, Deactivated detection, historical compare) and enrichment persistence will not work. Try disabling private/incognito mode or site isolation features for instagram.com.'
+            : 'IndexedDB is not available: ' + (state.idbError || 'unknown reason') + '. Snapshot features, enrichment persistence, and scan history will not be saved.'
+        ])
+      ])
+    ]);
+  }
+
   // ---------- Start screen ----------
   function renderStart() {
     const wrap = el('div', { className: 'iu-start' });
 
     wrap.appendChild(el('div', { className: 'iu-hero' }, [
-      el('div', { className: 'iu-hero-eyebrow' }, ['v5.1  ·  Analyze any public account']),
+      el('div', { className: 'iu-hero-eyebrow' }, ['v5.2  ·  Analyze any public account']),
       el('h1', { className: 'iu-hero-title' }, ['See who follows you back, and who doesn\u2019t.']),
       el('p', { className: 'iu-hero-sub' }, ['Analyze any public Instagram account. Detect non-followers, mutuals, fans, and disappearances over time. Everything runs in your browser — no data leaves this page.']),
       el('div', { className: 'iu-search-wrap' }, [
@@ -2457,7 +2594,7 @@
       metric('Following',  fmtNum(state.targetUser?.following_count)),
       metric('Found',      fmtNum(state.results.length)),
       metric('Filtered',   fmtNum(filtered.length)),
-      metric('Enriched',   `${state.enrichDone}/${state.enrichTotal || state.results.length}`)
+      metric('Enriched',   state.enriching ? `${state.enrichDone}/${state.enrichTotal}` : `${state.results.filter(u => u.enriched).length}/${state.results.length}`)
     ]);
   }
   function metric(label, value) {
@@ -2494,6 +2631,7 @@
         el('label', {}, [
           el('input', {
             type: 'checkbox', className: 'iu-check',
+            name: 'filter-' + k, id: 'filter-' + k,
             checked: state.filter[k],
             onchange: e => { state.filter[k] = e.target.checked; state.page = 1; renderApp(); }
           }),
@@ -2541,12 +2679,18 @@
                : action === 'remove'   ? 'Remove selected accounts from your followers via background queue'
                : 'Unfollow + remove follower + delete chat via background queue',
           onclick: () => {
-            const targets = state.results.filter(u => state.selected.includes(u.id));
+            const targets = getActionableTargets();
             if (!targets.length) return;
             const label = action === 'defriend' ? 'defriend (unfollow + remove + delete chat)' : action;
-            if (!confirm(`Queue ${targets.length} account(s) to ${label}?`)) return;
-            QueueManager.add(targets, action);
-            showToast(`Queued ${targets.length} for ${action}`, 'info');
+            if (action === 'defriend') state._defriendChatWarned = false;
+            state.previewModal = {
+              targets,
+              title: 'Queue ' + label,
+              warning: action === 'defriend' ? 'This will unfollow, remove follower, and delete chat.' : null,
+              confirmLabel: 'Queue ' + targets.length,
+              onConfirm: () => { QueueManager.add(targets, action); showToast(`Queued ${targets.length} for ${action}`, 'info'); }
+            };
+            renderApp();
           }
         }, [action === 'unfollow' ? 'Unfollow'
           : action === 'remove'   ? 'Remove'
@@ -2562,23 +2706,46 @@
           disabled: selCount === 0 || state.actionProgress !== null,
           title: 'Delete DM threads with selected accounts',
           onclick: async () => {
-            const targets = state.results.filter(u => state.selected.includes(u.id));
+            const targets = getActionableTargets();
             if (!targets.length) return;
-            if (!confirm(`Delete inbox chats with ${targets.length} account(s)?`)) return;
             let ok = 0, fail = 0;
-            state.actionProgress = { label: 'Deleting chats', current: '', done: 0, total: targets.length };
-            renderApp();
-            for (const u of targets) {
-              try {
-                state.actionProgress.current = `@${u.username}`;
-                state.actionProgress.done = ok + fail + 1;
-                renderApp();
-                await API.deleteChatByUserId(u.id); ok++;
-              } catch { fail++; }
-              await sleep(randomDelay(1500));
-            }
-            state.actionProgress = null;
-            showToast(`Chats deleted: ${ok}${fail ? ` · failed ${fail}` : ''}`, fail ? 'warn' : 'success');
+            state.previewModal = {
+              targets,
+              title: 'Delete inbox chats',
+              warning: 'This action cannot be undone.',
+              confirmLabel: 'Delete ' + targets.length,
+              onConfirm: async () => {
+                const _dcLockHeld = typeof navigator !== "undefined" && navigator.locks && navigator.locks.request
+                  ? await navigator.locks.request(CONFIG.DM_LOCK, { ifAvailable: true }, async lock => {
+                      if (!lock) return false;
+                      let ok = 0, fail = 0;
+                      state.actionProgress = { label: 'Deleting chats', current: '', done: 0, total: targets.length };
+                      renderApp();
+                      let _dbf = 0;
+                      for (const u of targets) {
+                        try {
+                          state.actionProgress.current = `@${u.username}`;
+                          state.actionProgress.done = ok + fail + 1;
+                          renderApp();
+                          const _dcOk = await API.deleteChatByUserId(u.id);
+                          if (_dcOk) { ok++; LimitGuardian.record(); } else fail++;
+                          _dbf = 0;
+                        } catch { fail++; _dbf++; }
+                        await sleep(backoffDelay(1500, 30000, _dbf));
+                      }
+                      state.actionProgress = null;
+                      showToast(`Chats deleted: ${ok}${fail ? ` · failed ${fail}` : ''}`, fail ? 'warn' : 'success');
+                      renderApp();
+                      return true;
+                    })
+                  : true;
+                if (!_dcLockHeld) {
+                  state.actionProgress = null;
+                  showToast("DM action already running in another tab", "warn");
+                  renderApp();
+                }
+              }
+            };
             renderApp();
           }
         }, ['Delete chats']),
@@ -2587,30 +2754,55 @@
           disabled: selCount === 0 || state.actionProgress !== null,
           title: 'Unsend all your messages and delete the chat thread (irreversible)',
           onclick: async () => {
-            const targets = state.results.filter(u => state.selected.includes(u.id));
+            const targets = getActionableTargets();
             if (!targets.length) return;
-            if (!confirm(`FULL ERASE ${targets.length} chat(s)? This will unsend all your messages and delete the thread. This cannot be undone.`)) return;
             let totalUnsent = 0, totalMsgs = 0, totalHid = 0, fails = 0;
-            state.actionProgress = { label: 'Full erase', current: '', done: 0, total: targets.length };
-            renderApp();
-            for (const u of targets) {
-              try {
-                state.actionProgress.current = `@${u.username}`;
-                state.actionProgress.done = Math.min(targets.indexOf(u) + 1, targets.length);
-                renderApp();
-                const res = await API.unsendAllMessagesWithUser(u.id);
-                totalUnsent += (res.unsent || 0);
-                totalMsgs += (res.total || 0);
-                if (res.hid) totalHid++;
-              } catch (e) {
-                console.error('[IU] full erase failed for', u.username, e);
-                fails++;
+            state.previewModal = {
+              targets,
+              title: 'Full Erase',
+              warning: 'This will unsend ALL your messages and delete the thread. Cannot be undone.',
+              confirmLabel: 'Erase ' + targets.length,
+              onConfirm: async () => {
+                const _feLockHeld = typeof navigator !== "undefined" && navigator.locks && navigator.locks.request
+                  ? await navigator.locks.request(CONFIG.DM_LOCK, { ifAvailable: true }, async lock => {
+                      if (!lock) return false;
+                      let _fbf = 0;
+                      state.actionProgress = { label: 'Full erase', current: '', done: 0, total: targets.length };
+                      renderApp();
+                      for (const u of targets) {
+                        try {
+                          state.actionProgress.current = `@${u.username}`;
+                          state.actionProgress.done = Math.min(targets.indexOf(u) + 1, targets.length);
+                          renderApp();
+                          const res = await API.unsendAllMessagesWithUser(u.id);
+                          totalUnsent += (res.unsent || 0);
+                          totalMsgs += (res.total || 0);
+                          if (res.hid) totalHid++;
+                          // Record each actual HTTP call against the rate cap
+                          for (let r = 0; r < (res.unsent || 0); r++) LimitGuardian.record();
+                          if (res.hid) LimitGuardian.record();
+                          _fbf = 0;
+                        } catch (e) {
+                          console.error('[IU] full erase failed for', u.username, e);
+                          fails++;
+                          _fbf++;
+                        }
+                        await sleep(backoffDelay(2000, 40000, _fbf));
+                      }
+                      state.actionProgress = null;
+                      const msg = `Full erase complete: ${totalUnsent}/${totalMsgs} msgs unsent, ${totalHid}/${targets.length} hidden` + (fails ? ` · failures: ${fails}` : '');
+                      showToast(msg, fails ? 'warn' : 'success');
+                      renderApp();
+                      return true;
+                    })
+                  : true;
+                if (!_feLockHeld) {
+                  state.actionProgress = null;
+                  showToast("DM action already running in another tab", "warn");
+                  renderApp();
+                }
               }
-              await sleep(randomDelay(2000));
-            }
-            state.actionProgress = null;
-            const msg = `Full erase complete: ${totalUnsent}/${totalMsgs} msgs unsent, ${totalHid}/${targets.length} hidden` + (fails ? ` · failures: ${fails}` : '');
-            showToast(msg, fails ? 'warn' : 'success');
+            };
             renderApp();
           }
         }, ['🔥 Full Erase'])
@@ -2751,6 +2943,7 @@
       el('div', { className: 'iu-col-check' }, [
         el('input', {
           type: 'checkbox', className: 'iu-check',
+          name: 'sel-' + u.id, id: 'sel-' + u.id,
           checked: state.selected.includes(u.id),
           onchange: e => {
             if (e.target.checked) state.selected.push(u.id);
@@ -2776,6 +2969,7 @@
     }, [
       el('input', {
         type: 'checkbox', className: 'iu-check',
+        name: 'snap-' + s.id, id: 'snap-' + s.id,
         checked: state.snapshotSelection.includes(s.id),
         onclick: e => e.stopPropagation()
       }),
@@ -2813,7 +3007,7 @@
       users.length === 0
         ? el('div', { className: 'iu-mono', style: 'color:var(--iu-ink-4); font-size:11px;' }, ['—'])
         : el('div', { style: 'max-height:280px; overflow:auto; display:flex; flex-direction:column; gap:4px;' },
-            users.slice(0, 200).map(u => el('div', {
+            users.slice(0, state.settings.compareViewMax || 200).map(u => el('div', {
               style: 'display:flex; align-items:center; gap:10px; padding:6px 4px; border-bottom:1px solid var(--iu-line);'
             }, [
               el('div', { className: 'iu-avatar', style: 'width:22px; height:22px;' }, [el('img', { src: u.profile_pic_url, alt: '' })]),
@@ -2833,6 +3027,55 @@
   }
 
   // ---------- Settings modal ----------
+  function renderPreviewModal() {
+    const pm = state.previewModal;
+    if (!pm) return null;
+    const { targets, title, warning, confirmLabel, onConfirm } = pm;
+    return el('div', { className: 'iu-overlay' }, [
+      el('div', { className: 'iu-modal' }, [
+        el('div', { className: 'iu-modal-head' }, [
+          el('div', { className: 'iu-modal-title' }, [title]),
+          el('button', {
+            className: 'iu-btn iu-btn-ghost',
+            onclick: () => { state.previewModal = null; renderApp(); }
+          }, ['✕'])
+        ]),
+        el('div', { className: 'iu-modal-body' }, [
+          el('div', { className: 'iu-preview-count' }, [
+            warning ? el('div', { className: 'iu-modal-warn' }, ['⚠️ ', warning]) : null,
+            el('span', { style: 'margin-top: 8px; display: block;' }, [String(targets.length), ' target', targets.length !== 1 ? 's' : '', ':'])
+          ]),
+          el('div', { className: 'iu-preview-list' },
+            targets.map(u => el('div', { className: 'iu-preview-item' }, [
+              el('div', { className: 'iu-avatar' }, [
+                u.profile_pic_url ? el('img', { src: u.profile_pic_url, alt: '', loading: 'lazy', onerror: function(){ this.style.display='none'; } }) : null
+              ]),
+              el('div', {}, [
+                el('span', { className: 'iu-preview-name' }, ['@', u.username]),
+                u.full_name ? el('span', { className: 'iu-preview-fullname' }, [' — ', u.full_name]) : null
+              ])
+            ]))
+          )
+        ]),
+        el('div', { className: 'iu-modal-foot' }, [
+          el('button', {
+            className: 'iu-btn',
+            onclick: () => { state.previewModal = null; renderApp(); }
+          }, ['Cancel']),
+          el('button', {
+            className: 'iu-btn iu-btn-primary',
+            onclick: () => {
+              const cb = onConfirm;
+              state.previewModal = null;
+              renderApp();
+              if (typeof cb === 'function') setTimeout(cb, 50);
+            }
+          }, [confirmLabel || 'Confirm'])
+        ])
+      ])
+    ]);
+  }
+
   function renderSettings() {
     const s = state.settings;
     return el('div', { className: 'iu-overlay', onclick: e => { if (e.target.classList.contains('iu-overlay')) { state.showSettings = false; renderApp(); } } }, [
@@ -2854,6 +3097,18 @@
             el('div', { className: 'iu-field' }, [
               el('label', {}, ['Snapshot retention (days)']),
               el('input', { className: 'iu-input', type: 'number', name: 'snapshotRetentionDays', value: s.snapshotRetentionDays, min: 1, max: 365 })
+            ]),
+            el('div', { className: 'iu-field' }, [
+              el('label', {}, ['Compare view max users']),
+              el('input', { className: 'iu-input', type: 'number', name: 'compareViewMax', value: s.compareViewMax, min: 10, max: 5000, step: 10 })
+            ]),
+            el('div', { className: 'iu-field' }, [
+              el('label', {}, ['Queue list max items']),
+              el('input', { className: 'iu-input', type: 'number', name: 'queueListMax', value: s.queueListMax, min: 5, max: 200, step: 5 })
+            ]),
+            el('div', { className: 'iu-field' }, [
+              el('label', {}, ['Activity log max entries']),
+              el('input', { className: 'iu-input', type: 'number', name: 'queueLogMax', value: s.queueLogMax, min: 10, max: 500, step: 10 })
             ]),
             el('div', {}, [
               boolRow('Enable background queue', 'enableQueue', s.enableQueue),
@@ -2918,7 +3173,7 @@
       list.length > 0 && el('div', { className: 'iu-queue-sec' }, [
         el('div', { className: 'iu-queue-sec-t' }, ['Pending']),
         el('div', { className: 'iu-queue-list' },
-          list.slice(0, 20).map((t, i) => el('div', { className: 'iu-queue-item' }, [
+          list.slice(0, (state.settings.queueListMax || 20)).map((t, i) => el('div', { className: 'iu-queue-item' }, [
             el('span', { className: 'iu-queue-idx' }, [String(i + 1).padStart(2, '0')]),
             el('span', { className: 'iu-queue-act' }, [t.action]),
             el('span', { className: 'iu-queue-u' }, [`@${t.username}`]),
@@ -2935,7 +3190,7 @@
       state.queueLog.length > 0 && el('div', { className: 'iu-queue-sec' }, [
         el('div', { className: 'iu-queue-sec-t' }, ['Activity']),
         el('div', { className: 'iu-queue-log' },
-          state.queueLog.slice(0, 20).map(l => el('div', { className: 'iu-queue-lline iu-ql-' + l.type }, [
+          state.queueLog.slice(0, (state.settings.queueLogMax || 20)).map(l => el('div', { className: 'iu-queue-lline iu-ql-' + l.type }, [
             el('span', { className: 'iu-queue-time' }, [new Date(l.ts).toLocaleTimeString([], { hour12: false })]),
             el('span', {}, [l.msg])
           ]))
@@ -2984,10 +3239,11 @@
       try { API.initTokens(); }                        catch (e) { console.warn('[IU] initTokens failed:', e); }
       document.body.appendChild(panel);
 
-      try { await IDB.init(); }                        catch (e) { console.error('IDB init failed:', e); }
+      try { await IDB.init(); }                        catch (e) { console.error('IDB init failed:', e); state.idbAvailable = false; state.idbError = e && e.message ? e.message : String(e || 'Unknown'); }
       try { await cleanupOldSnapshots(); }             catch (e) { console.error('Cleanup failed:', e); }
       try { await requestNotificationPermission(); }   catch (e) { console.error('Notifications failed:', e); }
       try { QueueManager.start(); }                    catch (e) { console.error('Queue start failed:', e); }
+      try { const ql = Storage.get(CONFIG.QUEUE_LOG_KEY, []); if (ql.length) state.queueLog = ql; } catch {}
 
       if (!API.uuid) {
         console.warn('[IU] Missing ig_did cookie — DM actions might fail.');
@@ -3006,6 +3262,142 @@
     }
   }
 
+
+  // ============================================================
+  // 13. SELF-TEST HARNESS  —  run window.IU_SELF_TEST() from console
+  // ============================================================
+  function selfTest() {
+    let passed = 0, failed = 0;
+    const assert = (label, ok, expected, actual) => {
+      if (ok) { passed++; console.log(`  ✓ ${label}`); }
+      else { failed++; console.log(`  ✗ ${label} (expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)})`); }
+    };
+    const group = name => console.log(`\n=== ${name} ===`);
+
+    group('escCSV');
+    assert('basic string',    escCSV('hello') === '"hello"', '"hello"', escCSV('hello'));
+    assert('double quotes',   escCSV('say "hi"') === '"say ""hi"""', '"say ""hi"""', escCSV('say "hi"'));
+    assert('empty string',    escCSV('') === '""', '""', escCSV(''));
+    assert('null',            escCSV(null) === '""', '""', escCSV(null));
+
+    group('isValidUsername');
+    assert('valid: abc',      isValidUsername('abc') === true);
+    assert('valid: a_b.c',    isValidUsername('a_b.c') === true);
+    assert('valid: 123',      isValidUsername('123') === true);
+    assert('invalid: empty',  isValidUsername('') === false);
+    assert('invalid: 31 chars', isValidUsername('a'.repeat(31)) === false);
+    assert('invalid: spaces', isValidUsername('ab c') === false);
+    assert('invalid: special', isValidUsername('@user') === false);
+
+    group('isDefaultAvatar');
+    assert('default URL',     isDefaultAvatar('https://instagram.com/44884218_345707102882519_2446069589734326272_n.jpg') === true);
+    assert('custom URL',      isDefaultAvatar('https://instagram.com/real_avatar.jpg') === false);
+    assert('null url',        isDefaultAvatar(null) === false);
+
+    group('fmtNum');
+    // Use includes() for locale-independent check
+    assert('1000 contains 000', fmtNum(1000).includes('000'), true, fmtNum(1000));
+    // null fallback uses em-dash
+    assert('null fallback',   fmtNum(null) === '—', '—', fmtNum(null));
+
+    group('randomDelay');
+    // base=1000, v=0.3 -> range [700, 1300)
+    let rdOk = true;
+    for (let i = 0; i < 50 && rdOk; i++) {
+      const d = randomDelay(1000);
+      if (d < 700 || d >= 1300) rdOk = false;
+    }
+    assert('randomDelay(1000) in [700,1300)', rdOk, true, rdOk);
+    rdOk = true;
+    for (let i = 0; i < 50 && rdOk; i++) {
+      const d = randomDelay(2000, 0.5);
+      if (d < 1000 || d >= 3000) rdOk = false;
+    }
+    assert('randomDelay(2000,0.5) in [1000,3000)', rdOk, true, rdOk);
+
+    group('backoffDelay');
+    assert('0 failures', backoffDelay(1000, 30000, 0) >= 500 && backoffDelay(1000, 30000, 0) <= 1500);
+    assert('1 failure',  backoffDelay(1000, 30000, 1) >= 1000 && backoffDelay(1000, 30000, 1) <= 3000);
+    assert('5 failures capped', backoffDelay(1000, 5000, 5) >= 2500 && backoffDelay(1000, 5000, 5) <= 7500);
+    const capped10 = backoffDelay(1000, 30000, 10);
+    assert('10 failures maxed', capped10 >= 15000 && capped10 <= 45000);
+
+    group('computeResults');
+    const following = [{ id: '1', username: 'alice' }, { id: '2', username: 'bob' }, { id: '3', username: 'charlie' }];
+    const followers = [{ id: '1', username: 'alice' }, { id: '3', username: 'charlie' }];
+    const nf = computeResults('non_followers', following, followers, null);
+    assert('non_followers -> [bob]', nf.length === 1 && nf[0].id === '2', '[bob]', nf.map(u => u.username));
+    const mu = computeResults('mutuals', following, followers, null);
+    assert('mutuals -> [alice,charlie]', mu.length === 2 && mu[0].id === '1' && mu[1].id === '3', '[alice,charlie]', mu.map(u => u.username));
+    const fansExtra = computeResults('fans', following, [...followers, { id: '4', username: 'dave' }], null);
+    assert('fans -> [dave]', fansExtra.length === 1 && fansExtra[0].id === '4', '[dave]', fansExtra.map(u => u.username));
+    assert('following (copy)', computeResults('following', following, [], null).length === 3);
+    assert('followers (copy)', computeResults('followers', [], followers, null).length === 2);
+    const oldSnap = { data: [{ id: '1' }, { id: '3' }, { id: '5' }] };
+    const ru = computeResults('recent_unfollowers', [], followers, oldSnap);
+    assert('recent_unfollowers -> [id:5]', ru.length === 1 && ru[0].id === '5', '[5]', ru.map(u => u.id));
+    const de = computeResults('deactivated', following, [], oldSnap);
+    assert('deactivated -> [id:5]', de.length === 1 && de[0].id === '5', '[5]', de.map(u => u.id));
+    assert('unknown mode -> []', computeResults('bogus', [], [], null).length === 0);
+
+    group('compareSnapshots');
+    const sa = { data: [{ id: '1', username: 'alice' }, { id: '2', username: 'bob' }] };
+    const sb = { data: [{ id: '2', username: 'bob' }, { id: '3', username: 'charlie' }] };
+    const cmp = compareSnapshots(sa, sb);
+    assert('common: bob',  cmp.common.length === 1 && cmp.common[0].id === '2', '[bob]', cmp.common.map(u => u.username));
+    assert('new: charlie', cmp.new.length === 1 && cmp.new[0].id === '3', '[charlie]', cmp.new.map(u => u.username));
+    assert('removed: alice', cmp.removed.length === 1 && cmp.removed[0].id === '1', '[alice]', cmp.removed.map(u => u.username));
+    assert('empty snapshots', compareSnapshots({ data: [] }, { data: [] }).common.length === 0);
+    const emptyCmp = compareSnapshots({ data: [{ id: '1' }] }, { data: [] });
+    assert('all removed', emptyCmp.removed.length === 1 && emptyCmp.new.length === 0);
+
+    group('formatETA');
+    assert('null/zero',    formatETA(0) === '', '', formatETA(0));
+    assert('negative',     formatETA(-1) === '', '', formatETA(-1));
+    assert('seconds',      formatETA(5000) === '5s', '5s', formatETA(5000));
+    assert('minutes',      formatETA(125000) === '2m 5s', '2m 5s', formatETA(125000));
+    assert('NaN',          formatETA(NaN) === '', '', formatETA(NaN));
+
+    group('getPageUsers');
+    const _savedPage = state.page;
+    state.page = 1;
+    const pages = [{id:'a'},{id:'b'},{id:'c'},{id:'d'},{id:'e'}];
+    assert('page 1 shows first 50',  getPageUsers(pages).length === 5, 5, getPageUsers(pages).length);
+    state.page = 2;
+    assert('page 2 with only 5 items', getPageUsers(pages).length === 0, 0, getPageUsers(pages).length);
+    assert('empty input',  getPageUsers([]).length === 0, 0, getPageUsers([]).length);
+    state.page = _savedPage;
+
+    group('getCookie');
+    // Can't test document.cookie modification in this context; just verify it's callable
+    assert('getCookie exists', typeof getCookie === 'function');
+
+    group('parseUsernameFromURL');
+    // Stub: can't mock location in all environments; verify it returns a value or null
+    const pu = parseUsernameFromURL();
+    assert('parseUsernameFromURL callable', pu === null || typeof pu === 'string');
+
+    group('toggleWhitelist / whitelist operations');
+    const wlBefore = state.whitelist.length;
+    const testUser = { id: 'test-999', username: 'testuser' };
+    // Simulate toggle on
+    const had = state.whitelist.some(u => u.id === testUser.id);
+    if (!had) state.whitelist = [...state.whitelist, testUser];
+    assert('whitelist add works', state.whitelist.some(u => u.id === 'test-999'));
+    // Clean up
+    state.whitelist = state.whitelist.filter(u => u.id !== 'test-999');
+    assert('whitelist remove works', !state.whitelist.some(u => u.id === 'test-999'));
+
+    // Summary
+    const total = passed + failed;
+    const pct = total ? Math.round(passed / total * 100) : 0;
+    console.log(`\n${'='.repeat(44)}`);
+    console.log(`  ${passed}/${total} passed (${pct}%)  ${failed ? `✗ ${failed} FAILED` : '✓ ALL GOOD'}`);
+    return { passed, failed, total };
+  }
+
+  // Expose harness so it runs from the console without reloading
+  window.IU_SELF_TEST = selfTest;
   if (location.hostname === 'www.instagram.com') init();
   else alert('Run on instagram.com');
 

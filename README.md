@@ -2,7 +2,7 @@
 
 A Tampermonkey/Violentmonkey userscript that analyzes Instagram following/follower relationships, identifies non-reciprocal follows, and provides bulk action tools — all running in your browser.
 
-![Version](https://img.shields.io/badge/version-5.1-000?style=flat-square)
+![Version](https://img.shields.io/badge/version-5.2-000?style=flat-square)
 
 ---
 
@@ -95,6 +95,9 @@ Accessible from the header. Configure:
 - **Search delay** — pause between API fetches during scan (default 1000ms)
 - **Unfollow delay** — pause between queue actions (default 4000ms)
 - **Snapshot retention** — days to keep historical snapshots (default 30)
+- **Compare view max** — max users shown per section in snapshot comparison (default 200)
+- **Queue list max** — max pending tasks shown in queue panel (default 20)
+- **Activity log max** — max entries in queue activity log (default 100, persisted to localStorage)
 - **Enable queue** — toggle background processing on/off
 - **Auto-whitelist verified** — automatically protect verified accounts
 - **Auto-whitelist private** — automatically protect private accounts
