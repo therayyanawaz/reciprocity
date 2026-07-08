@@ -2,7 +2,7 @@
 
 A Tampermonkey/Violentmonkey userscript that analyzes Instagram following/follower relationships, identifies non-reciprocal follows, and provides bulk action tools — all running in your browser.
 
-![Version](https://img.shields.io/badge/version-5.2-000?style=flat-square)
+![Version](https://img.shields.io/badge/version-5.3-000?style=flat-square)
 
 ---
 

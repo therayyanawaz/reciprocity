@@ -4,6 +4,18 @@ All notable changes to Instagram Unfollowers.
 
 ---
 
+## [5.3] — 2026-07-08
+
+### Added
+- **Per-account localStorage isolation** — All storage keys (whitelist, settings, queue tasks, action limits, queue log) are now suffixed with the Instagram user ID. Multiple accounts in the same browser no longer share or leak data between each other.
+- **Whitelist enrichment** — Whitelisted accounts can now be enriched with follower/following counts via a "WL Enrich" button in the sidebar. Enriched whitelist users show real follower/following ratio data in the table. Data persists across page reloads.
+
+### Fixed
+- **Cross-account data bleed** — Queue logs, whitelists, settings, and 24h action limits were stored under shared localStorage keys. Switching accounts would show the other account's data. Each account now gets its own independent namespace.
+- **Whitelist tab empty when users exist** — The whitelist tab was filtering scan results by whitelist membership, so whitelisted users not in the current scan never appeared. Now displays all whitelisted accounts directly from `state.whitelist`.
+
+---
+
 ## [5.2] — 2026-07-04
 
 ### Added

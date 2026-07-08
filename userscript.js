@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Reciprocity
 // @namespace    https://instagram.com/
-// @version      5.2
+// @version      5.3
 // @description  Analyze Instagram following/follower relationships and identify non-reciprocal follows
 // @author       therayyanawaz
 // @match        https://www.instagram.com/*
@@ -9,7 +9,7 @@
 // ==/UserScript==
 
 /**
- * Reciprocity v5 — Pure minimal dark rebuild.
+ * Reciprocity v5.3 — Pure minimal dark rebuild.
  * Full UI/render rewrite. API + IndexedDB + Queue contracts preserved
  * so existing user data (whitelist, settings, snapshots, queue) survives.
  */
@@ -569,9 +569,9 @@
     .iu-row:last-child { border-bottom: 0; }
     .iu-row:hover { background: var(--iu-bg-2); }
     .iu-row .iu-col-user { flex: 1; display: flex; align-items: center; gap: 12px; min-width: 0; }
-    .iu-row .iu-col-badges { display: flex; align-items: center; gap: 4px; flex: 0 0 auto; padding-right: 12px; }
+    .iu-row .iu-col-badges { display: flex; align-items: center; gap: 4px; flex: 0 0 80px; padding-right: 12px; }
     .iu-row .iu-col-ratio { flex: 0 0 90px; text-align: right; font-family: var(--iu-mono); font-size: 12px; color: var(--iu-ink-3); }
-    .iu-row .iu-col-actions { flex: 0 0 auto; display: flex; gap: 4px; }
+    .iu-row .iu-col-actions { flex: 0 0 auto; display: flex; gap: 4px; padding-left: 12px; }
     .iu-row .iu-col-check { flex: 0 0 32px; display: flex; justify-content: center; }
     .iu-username {
       font-family: var(--iu-font);
@@ -1764,6 +1764,17 @@
 
   };
 
+  // Scope localStorage keys per Instagram user account
+  // Each logged-in account gets its own independent localStorage namespace
+  // to prevent cross-account data leaks (queue, whitelist, settings, limits, log)
+  if (API.userId) {
+    CONFIG.STORAGE_KEY   += '_' + API.userId;
+    CONFIG.SETTINGS_KEY  += '_' + API.userId;
+    CONFIG.QUEUE_KEY     += '_' + API.userId;
+    CONFIG.LIMITS_KEY    += '_' + API.userId;
+    CONFIG.QUEUE_LOG_KEY += '_' + API.userId;
+  }
+
   // ============================================================
   // 6. LIMIT GUARDIAN
   // ============================================================
@@ -1982,6 +1993,45 @@
     });
   }
 
+  async function enrichWhitelist() {
+    if (state.wlEnriching) return;
+    const toEnrich = state.whitelist.filter(u => !u.enriched);
+    if (toEnrich.length === 0) {
+      showToast('All whitelist users already enriched', 'info');
+      return;
+    }
+    state.wlEnriching = true;
+    state.wlEnrichProgress = { done: 0, total: toEnrich.length, current: '' };
+    renderApp();
+    showToast(`Enriching ${toEnrich.length} whitelist users...`, 'info');
+    let failures = 0, _ebf = 0;
+    for (const wlUser of toEnrich) {
+      if (!state.wlEnriching) break;
+      state.wlEnrichProgress.current = `@${wlUser.username}`;
+      state.wlEnrichProgress.done++;
+      try {
+        const d = await API.getUserByUsername(wlUser.username);
+        wlUser.follower_count = d.follower_count;
+        wlUser.following_count = d.following_count;
+        wlUser.enriched = true;
+        _ebf = 0;
+      } catch {
+        failures++;
+        _ebf++;
+      }
+      renderApp();
+      await sleep(backoffDelay(1500, 30000, _ebf));
+    }
+    // Persist updated whitelist with enrichment data
+    Storage.set(CONFIG.STORAGE_KEY, state.whitelist);
+    state.wlEnriching = false;
+    state.wlEnrichProgress = null;
+    renderApp();
+    const enriched = toEnrich.length - failures;
+    const msg = `Whitelist enrichment: ${enriched} enriched${failures ? ` · ${failures} failed` : ''}`;
+    showToast(msg, failures ? 'warn' : 'success');
+  }
+
   // ============================================================
   // 9. STATE
   // ============================================================
@@ -2005,10 +2055,11 @@
     showSettings: false,
     toast: null,
     error: null,
-    filter: { verified: true, private: true, noAvatar: false, highSpam: false },
+    filter: { verified: false, private: false, noAvatar: false, highSpam: false },
     scanMode: 'non_followers',
     snapshots: [], snapshotSelection: [], compareResult: null,
     enriching: false, enrichQueue: [], enrichDone: 0, enrichTotal: 0,
+    wlEnriching: false, wlEnrichProgress: null,  // { done, total, current } or null
     scanPhase: '',
     queueCurrent: null, queueLog: [], queueOpen: false,
     actionProgress: null,   // { label, current, done, total } | null
@@ -2072,13 +2123,22 @@
     }
   }
   function getFilteredUsers() {
+    if (state.tab === 'whitelist') {
+      // Show all whitelisted users directly, not just those in current scan results
+      return state.whitelist.filter(u => {
+        if (state.search && !u.username.toLowerCase().includes(state.search.toLowerCase())) return false;
+        if (state.filter.verified && !u.is_verified) return false;
+        if (state.filter.private && !u.is_private) return false;
+        return true;
+      }).sort((a, b) => a.username.localeCompare(b.username));
+    }
+    // Main tab: show results, excluding whitelisted users
     return state.results.filter(u => {
       const wl = state.whitelist.some(w => w.id === u.id);
-      if (state.tab === 'whitelist' && !wl) return false;
-      if (state.tab === 'main' && wl) return false;
+      if (wl) return false;
       if (state.search && !u.username.toLowerCase().includes(state.search.toLowerCase())) return false;
-      if (!state.filter.verified && u.is_verified) return false;
-      if (!state.filter.private && u.is_private) return false;
+      if (state.filter.verified && !u.is_verified) return false;
+      if (state.filter.private && !u.is_private) return false;
       const spam = u.following_count > 5000 && u.follower_count < 50;
       if (state.filter.highSpam && !spam) return false;
       if (state.filter.noAvatar && !isDefaultAvatar(u.profile_pic_url)) return false;
@@ -2411,7 +2471,7 @@
         el('div', { style: 'display:flex; flex-direction:column; gap:2px;' }, [
           el('div', { className: 'iu-brand-name' }, ['Reciprocity']),
           el('div', { className: 'iu-brand-sub' }, [
-            has && state.targetUser ? `@${state.targetUser.username}` : 'v5.2'
+            has && state.targetUser ? `@${state.targetUser.username}` : 'v5.3'
           ])
         ])
       ]),
@@ -2419,7 +2479,7 @@
         el('div', { className: 'iu-dot' }),
         el('span', { 'data-phase': '' }, [state.scanPhase || 'Working']),
         el('span', { 'data-eta': '' }, [computeETA() ? `ETA ${computeETA()}` : '']),
-        el('span', { 'data-pct': '' }, [Math.round(state.pct) + '%'])
+        el('span', { 'data-pct': '' }, [state.pct > 0 ? Math.round(state.pct) + '%' : '…'])
       ]) : null,
       el('div', { className: 'iu-header-actions' }, [
         state.status === 'scanning' && el('input', {
@@ -2460,7 +2520,7 @@
     const wrap = el('div', { className: 'iu-start' });
 
     wrap.appendChild(el('div', { className: 'iu-hero' }, [
-      el('div', { className: 'iu-hero-eyebrow' }, ['v5.2  ·  Analyze any public account']),
+      el('div', { className: 'iu-hero-eyebrow' }, ['v5.3  ·  Analyze any public account']),
       el('h1', { className: 'iu-hero-title' }, ['See who follows you back, and who doesn\u2019t.']),
       el('p', { className: 'iu-hero-sub' }, ['Analyze any public Instagram account. Detect non-followers, mutuals, fans, and disappearances over time. Everything runs in your browser — no data leaves this page.']),
       el('div', { className: 'iu-search-wrap' }, [
@@ -2630,10 +2690,10 @@
 
     // Filters
     const filters = [
-      ['verified', 'Verified accounts'],
-      ['private',  'Private accounts'],
-      ['noAvatar', 'Default avatars'],
-      ['highSpam', 'High spam ratio']
+      ['verified', 'Verified only'],
+      ['private',  'Private only'],
+      ['noAvatar', 'Default avatar only'],
+      ['highSpam', 'High spam only']
     ];
     sb.appendChild(el('div', { className: 'iu-panel-block' }, [
       el('h3', {}, ['Filters']),
@@ -2661,6 +2721,23 @@
         onclick: () => state.enriching ? (state.enriching = false, renderApp()) : startEnrichment(),
         disabled: state.results.length === 0
       }, [state.enriching ? 'Stop enrichment' : 'Enrich stats'])
+    ]));
+
+    // Whitelist enrichment
+    sb.appendChild(el('div', { className: 'iu-panel-block' }, [
+      el('h3', {}, ['WL Enrich']),
+      el('div', { className: 'iu-mono', style: 'font-size:11px; color:var(--iu-ink-3);' },
+        [state.wlEnriching
+          ? (state.wlEnrichProgress
+            ? `Enriching ${state.wlEnrichProgress.done}/${state.wlEnrichProgress.total}`
+            : 'Starting...')
+          : `${state.whitelist.filter(u => u.enriched).length} of ${state.whitelist.length} enriched`]
+      ),
+      el('button', {
+        className: 'iu-btn iu-btn-sm',
+        onclick: () => state.wlEnriching ? (state.wlEnriching = false, renderApp()) : enrichWhitelist(),
+        disabled: state.whitelist.length === 0
+      }, [state.wlEnriching ? 'Stop enrichment' : 'Enrich stats'])
     ]));
 
     // Selection / actions
@@ -2894,9 +2971,9 @@
       el('div', { className: 'iu-table' }, [
         el('div', { className: 'iu-table-head' }, [
           el('div', { style: 'flex:1;' }, ['Account']),
-          el('div', { style: 'flex:0 0 auto; padding-right:12px;' }, ['Flags']),
+          el('div', { style: 'flex:0 0 80px; padding-right:12px;' }, ['Flags']),
           el('div', { style: 'flex:0 0 90px; text-align:right;' }, ['Ratio']),
-          el('div', { style: 'flex:0 0 auto;' }, ['Actions']),
+          el('div', { style: 'flex:0 0 auto; padding-left:12px;' }, ['Actions']),
           el('div', { style: 'flex:0 0 32px; text-align:center;' }, ['Sel'])
         ]),
         ...pageUsers.map(renderUserRow)
